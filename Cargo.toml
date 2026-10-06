@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = ["server", "importer", "harness"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "Proprietary"
+publish = false
+
+[workspace.lints.rust]
+# REQ-0048: unsafe is allowed only where documented; unsafe ops inside
+# unsafe fns must still sit in their own commented unsafe block.
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+missing_safety_doc = "deny"

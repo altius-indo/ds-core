@@ -1,0 +1,1382 @@
+# GQL conformance matrix for DS-CORE v1 (REQ-0003 AC1, TASK-0015).
+#
+# Source: the 228 optional features in ISO/IEC 39075:2024 ed. 1, taken verbatim from the
+# standard's machine-readable artifact ISO_IEC_39075(en)-features.xml at
+# https://standards.iso.org/iso-iec/39075/ed-1/en/ (fetched into spec/, not committed, by
+# scripts/gql/fetch-iso-features.sh). Mandatory features have no code in the
+# standard and are all required; they are tracked by subclause in tests/gql_conformance.rs.
+#
+# status: supported | partial | unsupported (REQ-0003 AC1). Unsupported syntax must fail with a
+# parse error naming the feature id (REQ-0003 AC3).
+#
+# Totals: supported=52 partial=6 unsupported=170
+# Status: Draft - pending review.
+
+[[feature]]
+id = "G002"
+name = "Different-edges match mode"
+status = "unsupported"
+reason = "Path-pattern feature outside the v1 OLTP scope (REQ-0022, REQ-0023); revisit with HTAP analytics (TASK-0024)."
+
+[[feature]]
+id = "G003"
+name = "Explicit REPEATABLE ELEMENTS keyword"
+status = "unsupported"
+reason = "Path-pattern feature outside the v1 OLTP scope (REQ-0022, REQ-0023); revisit with HTAP analytics (TASK-0024)."
+
+[[feature]]
+id = "G004"
+name = "Path variables"
+status = "unsupported"
+reason = "Path variables need path value types (GV55), out of v1 scope."
+
+[[feature]]
+id = "G005"
+name = "Path search prefix in a path pattern"
+status = "unsupported"
+reason = "Path-pattern feature outside the v1 OLTP scope (REQ-0022, REQ-0023); revisit with HTAP analytics (TASK-0024)."
+
+[[feature]]
+id = "G006"
+name = "Graph pattern KEEP clause: path mode prefix"
+status = "unsupported"
+reason = "Path-pattern feature outside the v1 OLTP scope (REQ-0022, REQ-0023); revisit with HTAP analytics (TASK-0024)."
+
+[[feature]]
+id = "G007"
+name = "Graph pattern KEEP clause: path search prefix"
+status = "unsupported"
+reason = "Path-pattern feature outside the v1 OLTP scope (REQ-0022, REQ-0023); revisit with HTAP analytics (TASK-0024)."
+
+[[feature]]
+id = "G010"
+name = "Explicit WALK keyword"
+status = "supported"
+reason = "WALK is the only v1 path mode; the explicit keyword is accepted."
+
+[[feature]]
+id = "G011"
+name = "Advanced path modes: TRAIL"
+status = "unsupported"
+reason = "Path-pattern feature outside the v1 OLTP scope (REQ-0022, REQ-0023); revisit with HTAP analytics (TASK-0024)."
+
+[[feature]]
+id = "G012"
+name = "Advanced path modes: SIMPLE"
+status = "unsupported"
+reason = "Path-pattern feature outside the v1 OLTP scope (REQ-0022, REQ-0023); revisit with HTAP analytics (TASK-0024)."
+
+[[feature]]
+id = "G013"
+name = "Advanced path modes: ACYCLIC"
+status = "unsupported"
+reason = "Path-pattern feature outside the v1 OLTP scope (REQ-0022, REQ-0023); revisit with HTAP analytics (TASK-0024)."
+
+[[feature]]
+id = "G014"
+name = "Explicit PATH/PATHS keywords"
+status = "supported"
+reason = "Noise keyword; accepted."
+
+[[feature]]
+id = "G015"
+name = "All path search: explicit ALL keyword"
+status = "unsupported"
+reason = "Path-pattern feature outside the v1 OLTP scope (REQ-0022, REQ-0023); revisit with HTAP analytics (TASK-0024)."
+
+[[feature]]
+id = "G016"
+name = "Any path search"
+status = "unsupported"
+reason = "Path-pattern feature outside the v1 OLTP scope (REQ-0022, REQ-0023); revisit with HTAP analytics (TASK-0024)."
+
+[[feature]]
+id = "G017"
+name = "All shortest path search"
+status = "unsupported"
+reason = "Shortest-path search deferred to HTAP analytics (TASK-0024)."
+
+[[feature]]
+id = "G018"
+name = "Any shortest path search"
+status = "unsupported"
+reason = "Shortest-path search deferred to HTAP analytics (TASK-0024)."
+
+[[feature]]
+id = "G019"
+name = "Counted shortest path search"
+status = "unsupported"
+reason = "Shortest-path search deferred to HTAP analytics (TASK-0024)."
+
+[[feature]]
+id = "G020"
+name = "Counted shortest group search"
+status = "unsupported"
+reason = "Shortest-path search deferred to HTAP analytics (TASK-0024)."
+
+[[feature]]
+id = "G030"
+name = "Path multiset alternation"
+status = "unsupported"
+reason = "Path-pattern feature outside the v1 OLTP scope (REQ-0022, REQ-0023); revisit with HTAP analytics (TASK-0024)."
+
+[[feature]]
+id = "G031"
+name = "Path multiset alternation: variable length path operands"
+status = "unsupported"
+reason = "Path-pattern feature outside the v1 OLTP scope (REQ-0022, REQ-0023); revisit with HTAP analytics (TASK-0024)."
+
+[[feature]]
+id = "G032"
+name = "Path pattern union"
+status = "unsupported"
+reason = "Path-pattern feature outside the v1 OLTP scope (REQ-0022, REQ-0023); revisit with HTAP analytics (TASK-0024)."
+
+[[feature]]
+id = "G033"
+name = "Path pattern union: variable length path operands"
+status = "unsupported"
+reason = "Path-pattern feature outside the v1 OLTP scope (REQ-0022, REQ-0023); revisit with HTAP analytics (TASK-0024)."
+
+[[feature]]
+id = "G035"
+name = "Quantified paths"
+status = "unsupported"
+reason = "Path-pattern feature outside the v1 OLTP scope (REQ-0022, REQ-0023); revisit with HTAP analytics (TASK-0024)."
+
+[[feature]]
+id = "G036"
+name = "Quantified edges"
+status = "supported"
+reason = "Bounded variable-length edges {m,n} for multi-hop traversals (EPIC-0005)."
+
+[[feature]]
+id = "G037"
+name = "Questioned paths"
+status = "unsupported"
+reason = "Path-pattern feature outside the v1 OLTP scope (REQ-0022, REQ-0023); revisit with HTAP analytics (TASK-0024)."
+
+[[feature]]
+id = "G038"
+name = "Parenthesized path pattern expression"
+status = "unsupported"
+reason = "Path-pattern feature outside the v1 OLTP scope (REQ-0022, REQ-0023); revisit with HTAP analytics (TASK-0024)."
+
+[[feature]]
+id = "G039"
+name = "Simplified path pattern expression: full defaulting"
+status = "unsupported"
+reason = "Path-pattern feature outside the v1 OLTP scope (REQ-0022, REQ-0023); revisit with HTAP analytics (TASK-0024)."
+
+[[feature]]
+id = "G041"
+name = "Non-local element pattern predicates"
+status = "unsupported"
+reason = "Path-pattern feature outside the v1 OLTP scope (REQ-0022, REQ-0023); revisit with HTAP analytics (TASK-0024)."
+
+[[feature]]
+id = "G043"
+name = "Complete full edge patterns"
+status = "partial"
+reason = "Directed and any-direction full edge patterns only; undirected (~) forms rejected because all edges are directed (REQ-0007, GH02)."
+
+[[feature]]
+id = "G044"
+name = "Basic abbreviated edge patterns"
+status = "supported"
+reason = "-> <- and - abbreviations; core of one-hop traversal (REQ-0023)."
+
+[[feature]]
+id = "G045"
+name = "Complete abbreviated edge patterns"
+status = "partial"
+reason = "Directed abbreviations only; undirected (~) forms rejected (REQ-0007)."
+
+[[feature]]
+id = "G046"
+name = "Relaxed topological consistency: adjacent vertex patterns"
+status = "unsupported"
+reason = "Relaxed topological consistency not adopted."
+
+[[feature]]
+id = "G047"
+name = "Relaxed topological consistency: concise edge patterns"
+status = "unsupported"
+reason = "Relaxed topological consistency not adopted."
+
+[[feature]]
+id = "G048"
+name = "Parenthesized path pattern: subpath variable declaration"
+status = "unsupported"
+reason = "Path-pattern feature outside the v1 OLTP scope (REQ-0022, REQ-0023); revisit with HTAP analytics (TASK-0024)."
+
+[[feature]]
+id = "G049"
+name = "Parenthesized path pattern: path mode prefix"
+status = "unsupported"
+reason = "Path-pattern feature outside the v1 OLTP scope (REQ-0022, REQ-0023); revisit with HTAP analytics (TASK-0024)."
+
+[[feature]]
+id = "G050"
+name = "Parenthesized path pattern: WHERE clause"
+status = "unsupported"
+reason = "Path-pattern feature outside the v1 OLTP scope (REQ-0022, REQ-0023); revisit with HTAP analytics (TASK-0024)."
+
+[[feature]]
+id = "G051"
+name = "Parenthesized path pattern: non-local predicates"
+status = "unsupported"
+reason = "Path-pattern feature outside the v1 OLTP scope (REQ-0022, REQ-0023); revisit with HTAP analytics (TASK-0024)."
+
+[[feature]]
+id = "G060"
+name = "Bounded graph pattern quantifiers"
+status = "supported"
+reason = "Bounded quantifiers, required by G036."
+
+[[feature]]
+id = "G061"
+name = "Unbounded graph pattern quantifiers"
+status = "unsupported"
+reason = "Unbounded traversals have no cost bound on the OLTP path; rejected in v1."
+
+[[feature]]
+id = "G074"
+name = "Label expression: wildcard label"
+status = "supported"
+reason = "Wildcard label (%) is natural for a schemaless graph (REQ-0008)."
+
+[[feature]]
+id = "G080"
+name = "Simplified path pattern expression: basic defaulting"
+status = "unsupported"
+reason = "Path-pattern feature outside the v1 OLTP scope (REQ-0022, REQ-0023); revisit with HTAP analytics (TASK-0024)."
+
+[[feature]]
+id = "G081"
+name = "Simplified path pattern expression: full overrides"
+status = "unsupported"
+reason = "Path-pattern feature outside the v1 OLTP scope (REQ-0022, REQ-0023); revisit with HTAP analytics (TASK-0024)."
+
+[[feature]]
+id = "G082"
+name = "Simplified path pattern expression: basic overrides"
+status = "unsupported"
+reason = "Path-pattern feature outside the v1 OLTP scope (REQ-0022, REQ-0023); revisit with HTAP analytics (TASK-0024)."
+
+[[feature]]
+id = "G100"
+name = "ELEMENT_ID function"
+status = "supported"
+reason = "ELEMENT_ID exposes node/edge identifiers used by point lookups (REQ-0022)."
+
+[[feature]]
+id = "G110"
+name = "IS DIRECTED predicate"
+status = "supported"
+reason = "Always true: every edge is directed (REQ-0007)."
+
+[[feature]]
+id = "G111"
+name = "IS LABELED predicate"
+status = "supported"
+reason = "Label tests; labels are dynamic in a schemaless graph (REQ-0008)."
+
+[[feature]]
+id = "G112"
+name = "IS SOURCE and IS DESTINATION predicate"
+status = "supported"
+reason = "Cheap: endpoints are part of the edge key."
+
+[[feature]]
+id = "G113"
+name = "ALL_DIFFERENT predicate"
+status = "supported"
+reason = "Element identity predicate; cheap."
+
+[[feature]]
+id = "G114"
+name = "SAME predicate"
+status = "supported"
+reason = "Element identity predicate; cheap."
+
+[[feature]]
+id = "G115"
+name = "PROPERTY_EXISTS predicate"
+status = "supported"
+reason = "Required to test optional properties in a schemaless graph (REQ-0008)."
+
+[[feature]]
+id = "GA01"
+name = "IEEE 754 floating point operations"
+status = "supported"
+reason = "double is a stored type (REQ-0009)."
+
+[[feature]]
+id = "GA03"
+name = "Explicit ordering of nulls"
+status = "supported"
+reason = "NULLS FIRST/LAST; cheap in the sort operator."
+
+[[feature]]
+id = "GA04"
+name = "Universal comparison"
+status = "unsupported"
+reason = "Not needed for the v1 OLTP workload."
+
+[[feature]]
+id = "GA05"
+name = "Cast specification"
+status = "supported"
+reason = "CAST between the stored types (REQ-0009)."
+
+[[feature]]
+id = "GA06"
+name = "Value type predicate"
+status = "supported"
+reason = "IS TYPED predicates; needed because property types vary per element (REQ-0008)."
+
+[[feature]]
+id = "GA07"
+name = "Ordering by discarded binding variables"
+status = "unsupported"
+reason = "Not needed for the v1 OLTP workload."
+
+[[feature]]
+id = "GA08"
+name = "GQL-status objects with diagnostic records"
+status = "unsupported"
+reason = "Not needed for the v1 OLTP workload."
+
+[[feature]]
+id = "GA09"
+name = "Comparison of paths"
+status = "unsupported"
+reason = "No path values in v1 (GV55)."
+
+[[feature]]
+id = "GB01"
+name = "Long identifiers"
+status = "supported"
+reason = "Lexer-only."
+
+[[feature]]
+id = "GB02"
+name = "Double minus sign comments"
+status = "supported"
+reason = "Lexer-only."
+
+[[feature]]
+id = "GB03"
+name = "Double solidus comments"
+status = "supported"
+reason = "Lexer-only."
+
+[[feature]]
+id = "GC01"
+name = "Graph schema management"
+status = "unsupported"
+reason = "Catalog/schema DDL deferred; graphs are created through the admin API in v1."
+
+[[feature]]
+id = "GC02"
+name = "Graph schema management: IF [ NOT ] EXISTS"
+status = "unsupported"
+reason = "Catalog/schema DDL deferred; graphs are created through the admin API in v1."
+
+[[feature]]
+id = "GC03"
+name = "Graph type: IF [ NOT ] EXISTS"
+status = "unsupported"
+reason = "Catalog/schema DDL deferred; graphs are created through the admin API in v1."
+
+[[feature]]
+id = "GC04"
+name = "Graph management"
+status = "unsupported"
+reason = "Catalog/schema DDL deferred; graphs are created through the admin API in v1."
+
+[[feature]]
+id = "GC05"
+name = "Graph management: IF [ NOT ] EXISTS"
+status = "unsupported"
+reason = "Catalog/schema DDL deferred; graphs are created through the admin API in v1."
+
+[[feature]]
+id = "GD01"
+name = "Updatable graphs"
+status = "supported"
+reason = "INSERT/SET/REMOVE/DELETE on nodes and edges (REQ-0022, DEC-0006)."
+
+[[feature]]
+id = "GD02"
+name = "Graph label set changes"
+status = "supported"
+reason = "SET/REMOVE labels; labels are dynamic (REQ-0008)."
+
+[[feature]]
+id = "GD03"
+name = "DELETE statement: subquery support"
+status = "unsupported"
+reason = "Not in v1 data-modification scope."
+
+[[feature]]
+id = "GD04"
+name = "DELETE statement: simple expression support"
+status = "unsupported"
+reason = "DELETE takes element variables only in v1 (DEC-0006)."
+
+[[feature]]
+id = "GE01"
+name = "Graph reference value expressions"
+status = "unsupported"
+reason = "Graph/binding-table references and parameters deferred; v1 supports value parameters only."
+
+[[feature]]
+id = "GE02"
+name = "Binding table reference value expressions"
+status = "unsupported"
+reason = "Graph/binding-table references and parameters deferred; v1 supports value parameters only."
+
+[[feature]]
+id = "GE03"
+name = "Let-binding of variables in expressions"
+status = "unsupported"
+reason = "Graph/binding-table references and parameters deferred; v1 supports value parameters only."
+
+[[feature]]
+id = "GE04"
+name = "Graph parameters"
+status = "unsupported"
+reason = "Graph/binding-table references and parameters deferred; v1 supports value parameters only."
+
+[[feature]]
+id = "GE05"
+name = "Binding table parameters"
+status = "unsupported"
+reason = "Graph/binding-table references and parameters deferred; v1 supports value parameters only."
+
+[[feature]]
+id = "GE06"
+name = "Path value construction"
+status = "unsupported"
+reason = "Graph/binding-table references and parameters deferred; v1 supports value parameters only."
+
+[[feature]]
+id = "GE07"
+name = "Boolean XOR"
+status = "supported"
+reason = "Boolean XOR; trivial."
+
+[[feature]]
+id = "GE08"
+name = "Reference parameters"
+status = "unsupported"
+reason = "Graph/binding-table references and parameters deferred; v1 supports value parameters only."
+
+[[feature]]
+id = "GE09"
+name = "Horizontal aggregation"
+status = "unsupported"
+reason = "Graph/binding-table references and parameters deferred; v1 supports value parameters only."
+
+[[feature]]
+id = "GF01"
+name = "Enhanced numeric functions"
+status = "supported"
+reason = "Scalar numeric functions over int64/double/decimal128."
+
+[[feature]]
+id = "GF02"
+name = "Trigonometric functions"
+status = "supported"
+reason = "Scalar math; trivial."
+
+[[feature]]
+id = "GF03"
+name = "Logarithmic functions"
+status = "supported"
+reason = "Scalar math; trivial."
+
+[[feature]]
+id = "GF04"
+name = "Enhanced path functions"
+status = "unsupported"
+reason = "Path/aggregate function deferred to HTAP analytics (TASK-0024)."
+
+[[feature]]
+id = "GF05"
+name = "Multi-character TRIM function"
+status = "supported"
+reason = "String function; trivial."
+
+[[feature]]
+id = "GF06"
+name = "Explicit TRIM function"
+status = "supported"
+reason = "String function; trivial."
+
+[[feature]]
+id = "GF07"
+name = "Byte string TRIM function"
+status = "supported"
+reason = "binary is a stored type (REQ-0009)."
+
+[[feature]]
+id = "GF10"
+name = "Advanced aggregate functions: general set functions"
+status = "unsupported"
+reason = "Path/aggregate function deferred to HTAP analytics (TASK-0024)."
+
+[[feature]]
+id = "GF11"
+name = "Advanced aggregate functions: binary set functions"
+status = "unsupported"
+reason = "Path/aggregate function deferred to HTAP analytics (TASK-0024)."
+
+[[feature]]
+id = "GF12"
+name = "CARDINALITY function"
+status = "supported"
+reason = "Lists are a stored type (REQ-0009)."
+
+[[feature]]
+id = "GF13"
+name = "SIZE function"
+status = "supported"
+reason = "Lists are a stored type (REQ-0009)."
+
+[[feature]]
+id = "GF20"
+name = "Aggregate functions in sort keys"
+status = "unsupported"
+reason = "Path/aggregate function deferred to HTAP analytics (TASK-0024)."
+
+[[feature]]
+id = "GG01"
+name = "Graph with an open graph type"
+status = "supported"
+reason = "Every graph has an open graph type: the graph is schemaless (DEC-0007, REQ-0008)."
+
+[[feature]]
+id = "GG02"
+name = "Graph with a closed graph type"
+status = "unsupported"
+reason = "Graph types are not used: the graph is schemaless (DEC-0007, REQ-0008)."
+
+[[feature]]
+id = "GG03"
+name = "Graph type inline specification"
+status = "unsupported"
+reason = "Graph types are not used: the graph is schemaless (DEC-0007, REQ-0008)."
+
+[[feature]]
+id = "GG04"
+name = "Graph type like a graph"
+status = "unsupported"
+reason = "Graph types are not used: the graph is schemaless (DEC-0007, REQ-0008)."
+
+[[feature]]
+id = "GG05"
+name = "Graph from a graph source"
+status = "unsupported"
+reason = "Graph types are not used: the graph is schemaless (DEC-0007, REQ-0008)."
+
+[[feature]]
+id = "GG20"
+name = "Explicit element type names"
+status = "unsupported"
+reason = "Graph types are not used: the graph is schemaless (DEC-0007, REQ-0008)."
+
+[[feature]]
+id = "GG21"
+name = "Explicit element type key label sets"
+status = "unsupported"
+reason = "Graph types are not used: the graph is schemaless (DEC-0007, REQ-0008)."
+
+[[feature]]
+id = "GG22"
+name = "Element type key label set inference"
+status = "unsupported"
+reason = "Graph types are not used: the graph is schemaless (DEC-0007, REQ-0008)."
+
+[[feature]]
+id = "GG23"
+name = "Optional element type key label sets"
+status = "unsupported"
+reason = "Graph types are not used: the graph is schemaless (DEC-0007, REQ-0008)."
+
+[[feature]]
+id = "GG24"
+name = "Relaxed structural consistency"
+status = "unsupported"
+reason = "Graph types are not used: the graph is schemaless (DEC-0007, REQ-0008)."
+
+[[feature]]
+id = "GG25"
+name = "Relaxed key label set uniqueness for edge types"
+status = "unsupported"
+reason = "Graph types are not used: the graph is schemaless (DEC-0007, REQ-0008)."
+
+[[feature]]
+id = "GG26"
+name = "Relaxed property value type consistency"
+status = "unsupported"
+reason = "Graph types are not used: the graph is schemaless (DEC-0007, REQ-0008)."
+
+[[feature]]
+id = "GH01"
+name = "External object references"
+status = "unsupported"
+reason = "Not supported in v1."
+
+[[feature]]
+id = "GH02"
+name = "Undirected edge patterns"
+status = "unsupported"
+reason = "All edges are directed (REQ-0007)."
+
+[[feature]]
+id = "GL01"
+name = "Hexadecimal literals"
+status = "supported"
+reason = "Lexer-only."
+
+[[feature]]
+id = "GL02"
+name = "Octal literals"
+status = "supported"
+reason = "Lexer-only."
+
+[[feature]]
+id = "GL03"
+name = "Binary literals"
+status = "supported"
+reason = "Lexer-only."
+
+[[feature]]
+id = "GL04"
+name = "Exact number in common notation without suffix"
+status = "supported"
+reason = "Decimal literals map to decimal128 (REQ-0009)."
+
+[[feature]]
+id = "GL05"
+name = "Exact number in common notation or as decimal integer with suffix"
+status = "unsupported"
+reason = "Literal form tied to a numeric type or format DS-CORE does not store (REQ-0009)."
+
+[[feature]]
+id = "GL06"
+name = "Exact number in scientific notation with suffix"
+status = "unsupported"
+reason = "Literal form tied to a numeric type or format DS-CORE does not store (REQ-0009)."
+
+[[feature]]
+id = "GL07"
+name = "Approximate number in common notation or as decimal integer with suffix"
+status = "unsupported"
+reason = "Literal form tied to a numeric type or format DS-CORE does not store (REQ-0009)."
+
+[[feature]]
+id = "GL08"
+name = "Approximate number in scientific notation with suffix"
+status = "unsupported"
+reason = "Literal form tied to a numeric type or format DS-CORE does not store (REQ-0009)."
+
+[[feature]]
+id = "GL09"
+name = "Optional float number suffix"
+status = "unsupported"
+reason = "Literal form tied to a numeric type or format DS-CORE does not store (REQ-0009)."
+
+[[feature]]
+id = "GL10"
+name = "Optional double number suffix"
+status = "unsupported"
+reason = "Literal form tied to a numeric type or format DS-CORE does not store (REQ-0009)."
+
+[[feature]]
+id = "GL11"
+name = "Opt-out character escaping"
+status = "unsupported"
+reason = "Literal form tied to a numeric type or format DS-CORE does not store (REQ-0009)."
+
+[[feature]]
+id = "GL12"
+name = "SQL datetime and interval formats"
+status = "unsupported"
+reason = "Literal form tied to a numeric type or format DS-CORE does not store (REQ-0009)."
+
+[[feature]]
+id = "GP01"
+name = "Inline procedure"
+status = "unsupported"
+reason = "Procedures and procedure-local variables deferred; v1 runs single linear statements."
+
+[[feature]]
+id = "GP02"
+name = "Inline procedure with implicit nested variable scope"
+status = "unsupported"
+reason = "Procedures and procedure-local variables deferred; v1 runs single linear statements."
+
+[[feature]]
+id = "GP03"
+name = "Inline procedure with explicit nested variable scope"
+status = "unsupported"
+reason = "Procedures and procedure-local variables deferred; v1 runs single linear statements."
+
+[[feature]]
+id = "GP04"
+name = "Named procedure calls"
+status = "unsupported"
+reason = "Procedures and procedure-local variables deferred; v1 runs single linear statements."
+
+[[feature]]
+id = "GP05"
+name = "Procedure-local value variable definitions"
+status = "unsupported"
+reason = "Procedures and procedure-local variables deferred; v1 runs single linear statements."
+
+[[feature]]
+id = "GP06"
+name = "Procedure-local value variable definitions: value variables based on simple expressions"
+status = "unsupported"
+reason = "Procedures and procedure-local variables deferred; v1 runs single linear statements."
+
+[[feature]]
+id = "GP07"
+name = "Procedure-local value variable definitions: value variable based on subqueries"
+status = "unsupported"
+reason = "Procedures and procedure-local variables deferred; v1 runs single linear statements."
+
+[[feature]]
+id = "GP08"
+name = "Procedure-local binding table variable definitions"
+status = "unsupported"
+reason = "Procedures and procedure-local variables deferred; v1 runs single linear statements."
+
+[[feature]]
+id = "GP09"
+name = "Procedure-local binding table variable definitions: binding table variables based on simple expressions or references"
+status = "unsupported"
+reason = "Procedures and procedure-local variables deferred; v1 runs single linear statements."
+
+[[feature]]
+id = "GP10"
+name = "Procedure-local binding table variable definitions: binding table variables based on subqueries"
+status = "unsupported"
+reason = "Procedures and procedure-local variables deferred; v1 runs single linear statements."
+
+[[feature]]
+id = "GP11"
+name = "Procedure-local graph variable definitions"
+status = "unsupported"
+reason = "Procedures and procedure-local variables deferred; v1 runs single linear statements."
+
+[[feature]]
+id = "GP12"
+name = "Procedure-local graph variable definitions: graph variables based on simple expressions or references"
+status = "unsupported"
+reason = "Procedures and procedure-local variables deferred; v1 runs single linear statements."
+
+[[feature]]
+id = "GP13"
+name = "Procedure-local graph variable definitions: graph variables based on subqueries"
+status = "unsupported"
+reason = "Procedures and procedure-local variables deferred; v1 runs single linear statements."
+
+[[feature]]
+id = "GP14"
+name = "Binding tables as procedure arguments"
+status = "unsupported"
+reason = "Procedures and procedure-local variables deferred; v1 runs single linear statements."
+
+[[feature]]
+id = "GP15"
+name = "Graphs as procedure arguments"
+status = "unsupported"
+reason = "Procedures and procedure-local variables deferred; v1 runs single linear statements."
+
+[[feature]]
+id = "GP16"
+name = "AT schema clause"
+status = "unsupported"
+reason = "Procedures and procedure-local variables deferred; v1 runs single linear statements."
+
+[[feature]]
+id = "GP17"
+name = "Binding variable definition block"
+status = "unsupported"
+reason = "Procedures and procedure-local variables deferred; v1 runs single linear statements."
+
+[[feature]]
+id = "GP18"
+name = "Catalog and data statement mixing"
+status = "unsupported"
+reason = "Procedures and procedure-local variables deferred; v1 runs single linear statements."
+
+[[feature]]
+id = "GQ01"
+name = "USE graph clause"
+status = "supported"
+reason = "Selects the target graph; keys are scoped by graph id."
+
+[[feature]]
+id = "GQ02"
+name = "Composite query: OTHERWISE"
+status = "unsupported"
+reason = "Composite/advanced query composition deferred past v1."
+
+[[feature]]
+id = "GQ03"
+name = "Composite query: UNION"
+status = "unsupported"
+reason = "Composite/advanced query composition deferred past v1."
+
+[[feature]]
+id = "GQ04"
+name = "Composite query: EXCEPT DISTINCT"
+status = "unsupported"
+reason = "Composite/advanced query composition deferred past v1."
+
+[[feature]]
+id = "GQ05"
+name = "Composite query: EXCEPT ALL"
+status = "unsupported"
+reason = "Composite/advanced query composition deferred past v1."
+
+[[feature]]
+id = "GQ06"
+name = "Composite query: INTERSECT DISTINCT"
+status = "unsupported"
+reason = "Composite/advanced query composition deferred past v1."
+
+[[feature]]
+id = "GQ07"
+name = "Composite query: INTERSECT ALL"
+status = "unsupported"
+reason = "Composite/advanced query composition deferred past v1."
+
+[[feature]]
+id = "GQ08"
+name = "FILTER statement"
+status = "supported"
+reason = "FILTER; cheap."
+
+[[feature]]
+id = "GQ09"
+name = "LET statement"
+status = "supported"
+reason = "LET; cheap."
+
+[[feature]]
+id = "GQ10"
+name = "FOR statement: list value support"
+status = "supported"
+reason = "FOR over a list parameter enables batched INSERTs."
+
+[[feature]]
+id = "GQ11"
+name = "FOR statement: WITH ORDINALITY"
+status = "unsupported"
+reason = "Composite/advanced query composition deferred past v1."
+
+[[feature]]
+id = "GQ12"
+name = "ORDER BY and page statement: OFFSET clause"
+status = "supported"
+reason = "OFFSET for paging."
+
+[[feature]]
+id = "GQ13"
+name = "ORDER BY and page statement: LIMIT clause"
+status = "supported"
+reason = "LIMIT; needed for bounded one-hop reads (REQ-0024 AC2)."
+
+[[feature]]
+id = "GQ14"
+name = "Complex expressions in sort keys"
+status = "supported"
+reason = "Expressions in ORDER BY."
+
+[[feature]]
+id = "GQ15"
+name = "GROUP BY clause"
+status = "unsupported"
+reason = "Composite/advanced query composition deferred past v1."
+
+[[feature]]
+id = "GQ16"
+name = "Pre-projection aliases in sort keys"
+status = "unsupported"
+reason = "Composite/advanced query composition deferred past v1."
+
+[[feature]]
+id = "GQ17"
+name = "Element-wise group variable operations"
+status = "unsupported"
+reason = "Composite/advanced query composition deferred past v1."
+
+[[feature]]
+id = "GQ18"
+name = "Scalar subqueries"
+status = "unsupported"
+reason = "Composite/advanced query composition deferred past v1."
+
+[[feature]]
+id = "GQ19"
+name = "Graph pattern YIELD clause"
+status = "unsupported"
+reason = "Composite/advanced query composition deferred past v1."
+
+[[feature]]
+id = "GQ20"
+name = "Advanced linear composition with NEXT"
+status = "unsupported"
+reason = "Composite/advanced query composition deferred past v1."
+
+[[feature]]
+id = "GQ21"
+name = "OPTIONAL: Multiple MATCH statements"
+status = "unsupported"
+reason = "Composite/advanced query composition deferred past v1."
+
+[[feature]]
+id = "GQ22"
+name = "EXISTS predicate: multiple MATCH statements"
+status = "unsupported"
+reason = "Composite/advanced query composition deferred past v1."
+
+[[feature]]
+id = "GQ23"
+name = "FOR statement: binding table support"
+status = "unsupported"
+reason = "Composite/advanced query composition deferred past v1."
+
+[[feature]]
+id = "GQ24"
+name = "FOR statement: WITH OFFSET"
+status = "unsupported"
+reason = "Composite/advanced query composition deferred past v1."
+
+[[feature]]
+id = "GS01"
+name = "SESSION SET command: session-local graph parameters"
+status = "unsupported"
+reason = "Session state is managed by the client protocol (REQ-0004); GQL session commands deferred."
+
+[[feature]]
+id = "GS02"
+name = "SESSION SET command: session-local binding table parameters"
+status = "unsupported"
+reason = "Session state is managed by the client protocol (REQ-0004); GQL session commands deferred."
+
+[[feature]]
+id = "GS03"
+name = "SESSION SET command: session-local value parameters"
+status = "unsupported"
+reason = "Session state is managed by the client protocol (REQ-0004); GQL session commands deferred."
+
+[[feature]]
+id = "GS04"
+name = "SESSION RESET command: reset all characteristics"
+status = "unsupported"
+reason = "Session state is managed by the client protocol (REQ-0004); GQL session commands deferred."
+
+[[feature]]
+id = "GS05"
+name = "SESSION RESET command: reset session schema"
+status = "unsupported"
+reason = "Session state is managed by the client protocol (REQ-0004); GQL session commands deferred."
+
+[[feature]]
+id = "GS06"
+name = "SESSION RESET command: reset session graph"
+status = "unsupported"
+reason = "Session state is managed by the client protocol (REQ-0004); GQL session commands deferred."
+
+[[feature]]
+id = "GS07"
+name = "SESSION RESET command: reset time zone displacement"
+status = "unsupported"
+reason = "Session state is managed by the client protocol (REQ-0004); GQL session commands deferred."
+
+[[feature]]
+id = "GS08"
+name = "SESSION RESET command: reset all session parameters"
+status = "unsupported"
+reason = "Session state is managed by the client protocol (REQ-0004); GQL session commands deferred."
+
+[[feature]]
+id = "GS10"
+name = "SESSION SET command: session-local binding table parameters based on subqueries"
+status = "unsupported"
+reason = "Session state is managed by the client protocol (REQ-0004); GQL session commands deferred."
+
+[[feature]]
+id = "GS11"
+name = "SESSION SET command: session-local value parameters based on subqueries"
+status = "unsupported"
+reason = "Session state is managed by the client protocol (REQ-0004); GQL session commands deferred."
+
+[[feature]]
+id = "GS12"
+name = "SESSION SET command: session-local graph parameters based on simple expressions or references"
+status = "unsupported"
+reason = "Session state is managed by the client protocol (REQ-0004); GQL session commands deferred."
+
+[[feature]]
+id = "GS13"
+name = "SESSION SET command: session-local binding table parameters based on simple expressions or references"
+status = "unsupported"
+reason = "Session state is managed by the client protocol (REQ-0004); GQL session commands deferred."
+
+[[feature]]
+id = "GS14"
+name = "SESSION SET command: session-local value parameters based on simple expressions"
+status = "unsupported"
+reason = "Session state is managed by the client protocol (REQ-0004); GQL session commands deferred."
+
+[[feature]]
+id = "GS15"
+name = "SESSION SET command: set time zone displacement"
+status = "unsupported"
+reason = "Session state is managed by the client protocol (REQ-0004); GQL session commands deferred."
+
+[[feature]]
+id = "GS16"
+name = "SESSION RESET command: reset individual session parameters"
+status = "unsupported"
+reason = "Session state is managed by the client protocol (REQ-0004); GQL session commands deferred."
+
+[[feature]]
+id = "GT01"
+name = "Explicit transaction commands"
+status = "supported"
+reason = "START TRANSACTION / COMMIT / ROLLBACK (REQ-0004 AC2)."
+
+[[feature]]
+id = "GT02"
+name = "Specified transaction characteristics"
+status = "partial"
+reason = "READ ONLY / READ WRITE accepted; isolation cannot be lowered from serializable (REQ-0014 AC1)."
+
+[[feature]]
+id = "GT03"
+name = "Use of multiple graphs in a transaction"
+status = "unsupported"
+reason = "A transaction targets one graph in v1."
+
+[[feature]]
+id = "GV01"
+name = "8 bit unsigned integer numbers"
+status = "unsupported"
+reason = "Type not among the stored property types (REQ-0009)."
+
+[[feature]]
+id = "GV02"
+name = "8 bit signed integer numbers"
+status = "unsupported"
+reason = "Type not among the stored property types (REQ-0009)."
+
+[[feature]]
+id = "GV03"
+name = "16 bit unsigned integer numbers"
+status = "unsupported"
+reason = "Type not among the stored property types (REQ-0009)."
+
+[[feature]]
+id = "GV04"
+name = "16 bit signed integer numbers"
+status = "unsupported"
+reason = "Type not among the stored property types (REQ-0009)."
+
+[[feature]]
+id = "GV05"
+name = "Small unsigned integer numbers"
+status = "unsupported"
+reason = "Type not among the stored property types (REQ-0009)."
+
+[[feature]]
+id = "GV06"
+name = "32 bit unsigned integer numbers"
+status = "unsupported"
+reason = "Type not among the stored property types (REQ-0009)."
+
+[[feature]]
+id = "GV07"
+name = "32 bit signed integer numbers"
+status = "unsupported"
+reason = "Type not among the stored property types (REQ-0009)."
+
+[[feature]]
+id = "GV08"
+name = "Regular unsigned integer numbers"
+status = "unsupported"
+reason = "Type not among the stored property types (REQ-0009)."
+
+[[feature]]
+id = "GV09"
+name = "Specified integer number precision"
+status = "unsupported"
+reason = "Type not among the stored property types (REQ-0009)."
+
+[[feature]]
+id = "GV10"
+name = "Big unsigned integer numbers"
+status = "unsupported"
+reason = "Type not among the stored property types (REQ-0009)."
+
+[[feature]]
+id = "GV11"
+name = "64 bit unsigned integer numbers"
+status = "unsupported"
+reason = "Type not among the stored property types (REQ-0009)."
+
+[[feature]]
+id = "GV12"
+name = "64 bit signed integer numbers"
+status = "supported"
+reason = "int64 is a stored type (REQ-0009)."
+
+[[feature]]
+id = "GV13"
+name = "128 bit unsigned integer numbers"
+status = "unsupported"
+reason = "Type not among the stored property types (REQ-0009)."
+
+[[feature]]
+id = "GV14"
+name = "128 bit signed integer numbers"
+status = "unsupported"
+reason = "Type not among the stored property types (REQ-0009)."
+
+[[feature]]
+id = "GV15"
+name = "256 bit unsigned integer numbers"
+status = "unsupported"
+reason = "Type not among the stored property types (REQ-0009)."
+
+[[feature]]
+id = "GV16"
+name = "256 bit signed integer numbers"
+status = "unsupported"
+reason = "Type not among the stored property types (REQ-0009)."
+
+[[feature]]
+id = "GV17"
+name = "Decimal numbers"
+status = "partial"
+reason = "Fixed decimal128 only; user-specified precision/scale rejected (REQ-0009)."
+
+[[feature]]
+id = "GV18"
+name = "Small signed integer numbers"
+status = "unsupported"
+reason = "Type not among the stored property types (REQ-0009)."
+
+[[feature]]
+id = "GV19"
+name = "Big signed integer numbers"
+status = "unsupported"
+reason = "Type not among the stored property types (REQ-0009)."
+
+[[feature]]
+id = "GV20"
+name = "16 bit floating point numbers"
+status = "unsupported"
+reason = "Type not among the stored property types (REQ-0009)."
+
+[[feature]]
+id = "GV21"
+name = "32 bit floating point numbers"
+status = "unsupported"
+reason = "Type not among the stored property types (REQ-0009)."
+
+[[feature]]
+id = "GV22"
+name = "Specified floating point number precision"
+status = "unsupported"
+reason = "Type not among the stored property types (REQ-0009)."
+
+[[feature]]
+id = "GV23"
+name = "Floating point type name synonyms"
+status = "partial"
+reason = "FLOAT/DOUBLE map to 64-bit double; REAL and precision forms rejected."
+
+[[feature]]
+id = "GV24"
+name = "64 bit floating point numbers"
+status = "supported"
+reason = "double is a stored type (REQ-0009)."
+
+[[feature]]
+id = "GV25"
+name = "128 bit floating point numbers"
+status = "unsupported"
+reason = "Type not among the stored property types (REQ-0009)."
+
+[[feature]]
+id = "GV26"
+name = "256 bit floating point numbers"
+status = "unsupported"
+reason = "Type not among the stored property types (REQ-0009)."
+
+[[feature]]
+id = "GV30"
+name = "Specified character string minimum length"
+status = "unsupported"
+reason = "Type not among the stored property types (REQ-0009)."
+
+[[feature]]
+id = "GV31"
+name = "Specified character string maximum length"
+status = "unsupported"
+reason = "Type not among the stored property types (REQ-0009)."
+
+[[feature]]
+id = "GV32"
+name = "Specified character string fixed length"
+status = "unsupported"
+reason = "Type not among the stored property types (REQ-0009)."
+
+[[feature]]
+id = "GV35"
+name = "Byte string types"
+status = "supported"
+reason = "binary is a stored type (REQ-0009)."
+
+[[feature]]
+id = "GV36"
+name = "Specified byte string minimum length"
+status = "unsupported"
+reason = "Type not among the stored property types (REQ-0009)."
+
+[[feature]]
+id = "GV37"
+name = "Specified byte string maximum length"
+status = "unsupported"
+reason = "Type not among the stored property types (REQ-0009)."
+
+[[feature]]
+id = "GV38"
+name = "Specified byte string fixed length"
+status = "unsupported"
+reason = "Type not among the stored property types (REQ-0009)."
+
+[[feature]]
+id = "GV39"
+name = "Temporal types: date, local datetime and local time support"
+status = "unsupported"
+reason = "Type not among the stored property types (REQ-0009)."
+
+[[feature]]
+id = "GV40"
+name = "Temporal types: zoned datetime and zoned time support"
+status = "partial"
+reason = "ZONED DATETIME maps to the stored timestamp; ZONED TIME unsupported (REQ-0009)."
+
+[[feature]]
+id = "GV41"
+name = "Temporal types: duration support"
+status = "unsupported"
+reason = "Type not among the stored property types (REQ-0009)."
+
+[[feature]]
+id = "GV45"
+name = "Record types"
+status = "supported"
+reason = "record is a stored type (REQ-0009)."
+
+[[feature]]
+id = "GV46"
+name = "Closed record types"
+status = "unsupported"
+reason = "Type not among the stored property types (REQ-0009)."
+
+[[feature]]
+id = "GV47"
+name = "Open record types"
+status = "supported"
+reason = "Records are open: schemaless properties (REQ-0008)."
+
+[[feature]]
+id = "GV48"
+name = "Nested record types"
+status = "supported"
+reason = "Nesting up to 100 levels (REQ-0009 AC2, REQ-0006)."
+
+[[feature]]
+id = "GV50"
+name = "List value types"
+status = "supported"
+reason = "list is a stored type (REQ-0009)."
+
+[[feature]]
+id = "GV55"
+name = "Path value types"
+status = "unsupported"
+reason = "Type not among the stored property types (REQ-0009)."
+
+[[feature]]
+id = "GV60"
+name = "Graph reference value types"
+status = "unsupported"
+reason = "Type not among the stored property types (REQ-0009)."
+
+[[feature]]
+id = "GV61"
+name = "Binding table reference value types"
+status = "unsupported"
+reason = "Type not among the stored property types (REQ-0009)."
+
+[[feature]]
+id = "GV65"
+name = "Dynamic union types"
+status = "unsupported"
+reason = "Type not among the stored property types (REQ-0009)."
+
+[[feature]]
+id = "GV66"
+name = "Open dynamic union types"
+status = "unsupported"
+reason = "Type not among the stored property types (REQ-0009)."
+
+[[feature]]
+id = "GV67"
+name = "Closed dynamic union types"
+status = "unsupported"
+reason = "Type not among the stored property types (REQ-0009)."
+
+[[feature]]
+id = "GV68"
+name = "Dynamic property value types"
+status = "supported"
+reason = "Property values may hold any stored type per element (REQ-0008)."
+
+[[feature]]
+id = "GV70"
+name = "Immaterial value types"
+status = "unsupported"
+reason = "Type not among the stored property types (REQ-0009)."
+
+[[feature]]
+id = "GV71"
+name = "Immaterial value types: null type support"
+status = "unsupported"
+reason = "Type not among the stored property types (REQ-0009)."
+
+[[feature]]
+id = "GV72"
+name = "Immaterial value types: empty type support"
+status = "unsupported"
+reason = "Type not among the stored property types (REQ-0009)."
+
+[[feature]]
+id = "GV90"
+name = "Explicit value type nullability"
+status = "unsupported"
+reason = "Type not among the stored property types (REQ-0009)."
+

@@ -3,7 +3,9 @@
 Distributed graph database engine: range-sharded ordered key-value storage on
 RocksDB, replicated per range with Raft, serializable transactions, GQL.
 
-Requirements, plan and decisions live in the reqforge project `DS-CORE`.
+Requirements, plan, decisions and design documents live in the reqforge
+project `DS-CORE` (design docs: `~/.reqforge/ds-core/design/`, shown in the
+reqforge app's Design view).
 
 ## Layout
 

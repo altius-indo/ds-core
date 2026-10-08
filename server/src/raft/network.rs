@@ -32,6 +32,11 @@ impl Router {
         self.nodes.lock().expect("router lock").insert(id, raft);
     }
 
+    /// Take a node off the network, as if its process had died.
+    pub fn remove(&self, id: NodeId) -> Option<Raft> {
+        self.nodes.lock().expect("router lock").remove(&id)
+    }
+
     /// Cut every link between nodes in different `groups`; links within a group stay up.
     pub fn partition(&self, groups: &[&[NodeId]]) {
         let mut cut = self.cut.lock().expect("router lock");

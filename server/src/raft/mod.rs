@@ -1,5 +1,6 @@
 //! Raft replication per range (DEC-0002) on openraft, with logs and state on RocksDB.
 
+pub mod config;
 pub mod log_store;
 pub mod network;
 pub mod placement;
@@ -17,12 +18,7 @@ use types::{NodeId, Raft, RangeId, TypeConfig};
 
 /// Production timing (design/raft-ranges.md §7): failover within the 10 s p99 of REQ-0018.
 pub fn default_config() -> Config {
-    Config {
-        heartbeat_interval: 300,
-        election_timeout_min: 3000,
-        election_timeout_max: 6000,
-        ..Default::default()
-    }
+    config::Timing::default().to_openraft()
 }
 
 #[derive(Debug)]

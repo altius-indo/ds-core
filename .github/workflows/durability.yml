@@ -37,3 +37,7 @@ jobs:
           key: lazyfs-0.3.1-${{ runner.os }}
       - name: E2 power-cut durability
         run: scripts/ci/lazyfs-powercut.sh "${{ github.event_name == 'push' && '25' || github.event.inputs.trials || '1000' }}"
+      - name: STORY-0003 E1 leader-kill failover p99
+        run: |
+          cargo build --quiet --release --locked -p dscore-harness
+          target/release/dscore-harness fault leader-kill --trials "${{ github.event_name == 'push' && '10' || '100' }}" --assert-p99-secs 10

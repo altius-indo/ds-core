@@ -100,38 +100,43 @@ impl Group {
 
 /// Drop every unsynced byte on the LazyFS mount and wait until LazyFS reports it is done, so
 /// the restart cannot race the fault.
+///
+/// Opening a FIFO for reading blocks until a writer opens it, and LazyFS opens the completion
+/// FIFO only after it has processed the command. So the reader waits on its own thread while
+/// another thread sends the command; doing both on one thread deadlocks.
 async fn clear_cache(fifo: &Path, done: Option<&Path>) -> Result<(), String> {
-    let fifo = fifo.to_path_buf();
-    let done = done.map(Path::to_path_buf);
-    let work = tokio::task::spawn_blocking(move || -> Result<(), String> {
-        use std::io::BufRead;
-        // Open the completion FIFO first: LazyFS writes to it as soon as the fault finishes.
-        let reader = match &done {
-            Some(d) => Some(std::io::BufReader::new(
-                std::fs::File::open(d).map_err(|e| format!("{}: {e}", d.display()))?,
-            )),
-            None => None,
-        };
-        std::fs::write(&fifo, b"lazyfs::clear-cache\n")
-            .map_err(|e| format!("{}: {e}", fifo.display()))?;
-        if let Some(mut r) = reader {
+    let reader = done.map(Path::to_path_buf).map(|d| {
+        tokio::task::spawn_blocking(move || -> Result<(), String> {
+            use std::io::BufRead;
+            let f = std::fs::File::open(&d).map_err(|e| format!("{}: {e}", d.display()))?;
+            let mut r = std::io::BufReader::new(f);
             let mut line = String::new();
             loop {
                 line.clear();
                 if r.read_line(&mut line).map_err(|e| e.to_string())? == 0 {
-                    return Err("lazyfs completion fifo closed".into());
+                    return Err("lazyfs completion fifo closed before reporting clear-cache".into());
                 }
                 if line.contains("clear-cache") {
                     return Ok(());
                 }
             }
-        }
-        Ok(())
+        })
     });
+    let fifo = fifo.to_path_buf();
+    let send = tokio::task::spawn_blocking(move || {
+        std::fs::write(&fifo, b"lazyfs::clear-cache\n")
+            .map_err(|e| format!("{}: {e}", fifo.display()))
+    });
+    let work = async {
+        send.await.map_err(|e| e.to_string())??;
+        if let Some(r) = reader {
+            r.await.map_err(|e| e.to_string())??;
+        }
+        Ok::<(), String>(())
+    };
     match tokio::time::timeout(STEP_TIMEOUT, work).await {
-        Ok(Ok(r)) => r,
-        Ok(Err(e)) => Err(e.to_string()),
-        Err(_) => Err("lazyfs clear-cache did not complete".into()),
+        Ok(r) => r,
+        Err(_) => Err("lazyfs clear-cache did not complete within 30 s".into()),
     }
 }
 
@@ -142,6 +147,7 @@ pub async fn run(opts: &Options) -> Result<Outcome, String> {
         lost: 0,
     };
     for trial in 0..opts.trials {
+        let started = std::time::Instant::now();
         let dir = opts.data_root.join(format!("trial-{trial}"));
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
@@ -177,10 +183,15 @@ pub async fn run(opts: &Options) -> Result<Outcome, String> {
         out.trials += 1;
         out.acknowledged += acked.len();
         out.lost += lost;
-        if (trial + 1) % 50 == 0 {
+        // Progress on every trial for short runs, every 10 for long ones (CI logs show it live).
+        if opts.trials <= 100 || (trial + 1) % 10 == 0 {
             println!(
-                "power-cut: {} trials, {} acknowledged, {} lost",
-                out.trials, out.acknowledged, out.lost
+                "power-cut: trial {}/{} took {:.1}s; {} acknowledged, {} lost so far",
+                trial + 1,
+                opts.trials,
+                started.elapsed().as_secs_f64(),
+                out.acknowledged,
+                out.lost
             );
         }
     }

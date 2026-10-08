@@ -47,3 +47,7 @@ jobs:
           target/release/dscore-harness fault leader-kill --trials "${{ github.event_name == 'push' && '10' || '100' }}" --assert-p99-secs 10
       - name: STORY-0002 E1 membership churn
         run: target/release/dscore-harness jepsen --workload membership --duration "${{ github.event_name == 'push' && '2m' || '1h' }}" --check single-leader,learner-promotion
+      - name: STORY-0007 E2 one-sided edge check
+        run: |
+          target/release/dscore-harness jepsen --workload edges --duration 15s --check bidirectional --unsafe-split-writes --expect-violations
+          target/release/dscore-harness jepsen --workload edges --duration "${{ github.event_name == 'push' && '2m' || '1h' }}" --check bidirectional

@@ -184,3 +184,231 @@ fn schemaless_unseen_labels_and_edge_type_need_no_ddl() {
     // The stored property bytes decode to the written record.
     assert_eq!(Record::decode(&ra.properties).unwrap(), a.properties);
 }
+
+// ------------------------------------------------------------------------------------------
+// STORY-0007: nodes and edges stored transactionally on a 3-range cluster whose split points
+// fall inside the node-id space, so an edge's endpoints live on different ranges.
+
+mod stored {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use dscore_server::graph::keys::{Direction, node_doc};
+    use dscore_server::graph::store::{Edge, Graph};
+    use dscore_server::graph::value::{Decimal128, Record, Value};
+    use dscore_server::txn::cluster::Cluster;
+    use dscore_server::txn::coordinator::{TxnClient, TxnConfig};
+    use dscore_server::txn::error::ErrorCode;
+    use openraft::Config;
+    use tempfile::TempDir;
+
+    const A: u64 = 1; // range 1
+    const B: u64 = (1 << 62) + 5; // range 2
+    const C: u64 = 3 << 62; // range 3
+
+    async fn env() -> (TxnClient, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let config = Config {
+            heartbeat_interval: 50,
+            election_timeout_min: 300,
+            election_timeout_max: 600,
+            ..Default::default()
+        };
+        let s1 = node_doc(1, 1 << 62);
+        let s2 = node_doc(1, 2 << 62);
+        let cluster = Cluster::start(dir.path(), 3, &[&s1, &s2], config)
+            .await
+            .unwrap();
+        let client = TxnClient::new(
+            Arc::new(cluster),
+            TxnConfig {
+                liveness_ttl: Duration::from_millis(300),
+                lock_wait: Duration::from_secs(3),
+            },
+        );
+        (client, dir)
+    }
+
+    fn rec(fields: Vec<(&str, Value)>) -> Record {
+        Record::new(
+            fields
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
+        )
+        .unwrap()
+    }
+
+    /// Records within lists within records, five levels deep (REQ-0006 AC1).
+    fn nested() -> Record {
+        let mut v = Value::String("leaf".into());
+        for level in 0..5 {
+            v = if level % 2 == 0 {
+                Value::List(vec![v, Value::Int64(level)])
+            } else {
+                Value::Record(rec(vec![("level", Value::Int64(level)), ("child", v)]))
+            };
+        }
+        rec(vec![
+            ("profile", v),
+            ("score", Value::Decimal(Decimal128::parse("99.95").unwrap())),
+        ])
+    }
+
+    // reqforge: verifies REQ-0006#AC1
+    // reqforge: verifies REQ-0007#AC1
+    // reqforge: verifies REQ-0007#AC2
+    // reqforge: verifies REQ-0010#AC1
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn node_edge_roundtrip() {
+        let (client, _dir) = env().await;
+        let g = Graph::new(1);
+
+        let mut t = client.begin().await.unwrap();
+        g.insert_node(&mut t, A, &["Account", "Customer", "Premium"], &nested())
+            .await
+            .unwrap();
+        g.insert_node(&mut t, B, &["Merchant"], &Record::empty())
+            .await
+            .unwrap();
+        g.insert_node(&mut t, C, &["Bank"], &Record::empty())
+            .await
+            .unwrap();
+        t.commit().await.unwrap();
+
+        // Node with 3 labels and 5-level nesting comes back unchanged.
+        let mut t = client.begin().await.unwrap();
+        let a = g.get_node(&mut t, A).await.unwrap().unwrap();
+        assert_eq!(a.labels, vec!["Account", "Customer", "Premium"]);
+        assert_eq!(a.properties, nested());
+
+        // Two parallel edges of the same type between the same nodes, with nested properties.
+        let paid = |rank: u64, amount: &str| Edge {
+            src: A,
+            dst: B,
+            edge_type: "PAID".into(),
+            rank,
+            properties: rec(vec![
+                ("amount", Value::Decimal(Decimal128::parse(amount).unwrap())),
+                (
+                    "meta",
+                    Value::Record(rec(vec![(
+                        "channel",
+                        Value::List(vec![Value::String("card".into())]),
+                    )])),
+                ),
+            ]),
+        };
+        let mut t = client.begin().await.unwrap();
+        g.insert_edge(&mut t, &paid(0, "12.50")).await.unwrap();
+        g.insert_edge(&mut t, &paid(1, "7.25")).await.unwrap();
+        g.insert_edge(
+            &mut t,
+            &Edge {
+                src: B,
+                dst: C,
+                edge_type: "BANKS_WITH".into(),
+                rank: 0,
+                properties: Record::empty(),
+            },
+        )
+        .await
+        .unwrap();
+        t.commit().await.unwrap();
+
+        let mut t = client.begin().await.unwrap();
+        let from_a = g
+            .edges(&mut t, A, Direction::Out, Some("PAID"))
+            .await
+            .unwrap();
+        let into_b = g
+            .edges(&mut t, B, Direction::In, Some("PAID"))
+            .await
+            .unwrap();
+        assert_eq!(
+            from_a,
+            vec![paid(0, "12.50"), paid(1, "7.25")],
+            "both parallel edges, unchanged"
+        );
+        assert_eq!(
+            into_b, from_a,
+            "traversal from either endpoint sees identical edges"
+        );
+        assert_eq!(
+            g.edges(&mut t, B, Direction::Out, None)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            g.edges(&mut t, A, Direction::In, None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        // Updating and deleting change both entries together.
+        let mut t = client.begin().await.unwrap();
+        g.set_edge_properties(&mut t, &paid(0, "13.00"))
+            .await
+            .unwrap();
+        assert!(g.delete_edge(&mut t, A, "PAID", B, 1).await.unwrap());
+        t.commit().await.unwrap();
+        let mut t = client.begin().await.unwrap();
+        assert_eq!(
+            g.edges(&mut t, A, Direction::Out, Some("PAID"))
+                .await
+                .unwrap(),
+            vec![paid(0, "13.00")]
+        );
+        assert_eq!(
+            g.edges(&mut t, B, Direction::In, Some("PAID"))
+                .await
+                .unwrap(),
+            vec![paid(0, "13.00")]
+        );
+    }
+
+    // reqforge: verifies REQ-0006#AC2
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn duplicate_node_id_rejected() {
+        let (client, _dir) = env().await;
+        let g = Graph::new(1);
+        let mut t = client.begin().await.unwrap();
+        g.insert_node(&mut t, B, &["First"], &Record::empty())
+            .await
+            .unwrap();
+        t.commit().await.unwrap();
+
+        let mut t = client.begin().await.unwrap();
+        let err = g
+            .insert_node(&mut t, B, &["Second"], &Record::empty())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::ConstraintViolation, "{err}");
+
+        let mut t = client.begin().await.unwrap();
+        assert_eq!(
+            g.get_node(&mut t, B).await.unwrap().unwrap().labels,
+            vec!["First"]
+        );
+
+        // An edge to a missing node is refused rather than left dangling.
+        let mut t = client.begin().await.unwrap();
+        let err = g
+            .insert_edge(
+                &mut t,
+                &Edge {
+                    src: B,
+                    dst: 424242,
+                    edge_type: "X".into(),
+                    rank: 0,
+                    properties: Record::empty(),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::ConstraintViolation);
+    }
+}

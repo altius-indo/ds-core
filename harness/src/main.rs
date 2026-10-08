@@ -9,9 +9,13 @@
 //!   dscore-harness jepsen --workload membership --duration 1h \
 //!       --check single-leader,learner-promotion [--max-lag 1000] [--seed N]
 //!
+//!   dscore-harness jepsen --workload edges --duration 1h --check bidirectional \
+//!       [--seed N] [--unsafe-split-writes --expect-violations]
+//!
 //! See powercut.rs, leaderkill.rs and membership_churn.rs for the methods. `node-group` is
 //! the child process the power-cut fault drives.
 
+mod edges;
 mod leaderkill;
 mod membership_churn;
 mod node_group;
@@ -33,8 +37,9 @@ fn parse_duration(s: &str) -> Option<std::time::Duration> {
 async fn jepsen(args: &[String]) -> ExitCode {
     match flag_value(args, "--workload").as_deref() {
         Some("membership") => {}
+        Some("edges") => return jepsen_edges(args).await,
         other => {
-            eprintln!("jepsen: unsupported workload {other:?}; available: membership");
+            eprintln!("jepsen: unsupported workload {other:?}; available: membership, edges");
             return ExitCode::from(2);
         }
     }
@@ -172,6 +177,57 @@ async fn power_cut(args: &[String]) -> ExitCode {
         }
         Err(e) => {
             eprintln!("power-cut: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn jepsen_edges(args: &[String]) -> ExitCode {
+    let Some(duration) = flag_value(args, "--duration")
+        .as_deref()
+        .and_then(parse_duration)
+    else {
+        return usage();
+    };
+    let seed = flag_value(args, "--seed")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| std::process::id() as u64);
+    let unsafe_split = has(args, "--unsafe-split-writes");
+    match edges::run(duration, seed, unsafe_split).await {
+        Ok(r) => {
+            println!(
+                "edges: {duration:?} seed {seed}: {} committed ops, {} conflicts, {} snapshot checks \
+                 (up to {} edges), {} violations{}",
+                r.committed,
+                r.conflicts,
+                r.checks,
+                r.max_edges_seen,
+                r.violations.len(),
+                if unsafe_split {
+                    " [unsafe split writes]"
+                } else {
+                    ""
+                }
+            );
+            for v in r.violations.iter().take(5) {
+                eprintln!("violation: {v} (REQ-0010 AC2)");
+            }
+            if has(args, "--expect-violations") {
+                if r.violations.is_empty() {
+                    eprintln!(
+                        "FAIL: expected one-sided edges with --unsafe-split-writes; the checker missed them"
+                    );
+                    return ExitCode::FAILURE;
+                }
+                return ExitCode::SUCCESS;
+            }
+            if !r.violations.is_empty() || r.committed == 0 || r.checks == 0 {
+                return ExitCode::FAILURE;
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("jepsen edges: {e}");
             ExitCode::FAILURE
         }
     }

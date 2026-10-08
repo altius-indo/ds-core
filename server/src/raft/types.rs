@@ -5,6 +5,8 @@ use std::io::Cursor;
 
 use serde::{Deserialize, Serialize};
 
+use crate::txn::mvcc::{TxnCommand, TxnResponse};
+
 /// Identifies a node (store) within every Raft group it belongs to.
 pub type NodeId = u64;
 pub type RangeId = u64;
@@ -34,10 +36,16 @@ pub enum Command {
     },
     /// Applied atomically, in order.
     Batch(Vec<Command>),
+    /// MVCC transaction operation (txn::mvcc).
+    Txn(TxnCommand),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CommandResult;
+pub enum CommandResult {
+    #[default]
+    Ok,
+    Txn(TxnResponse),
+}
 
 openraft::declare_raft_types!(
     pub TypeConfig:

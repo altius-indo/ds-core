@@ -14,6 +14,8 @@ use openraft::{AnyError, EntryPayload, OptionalSend};
 use rocksdb::{DB, Direction, IteratorMode, Options, WriteBatch};
 use serde::{Deserialize, Serialize};
 
+use crate::txn::mvcc;
+
 use super::types::{
     Command, CommandResult, Entry, LogId, RangeId, SnapshotMeta, StorageError, StorageIOError,
     StoredMembership, TypeConfig,
@@ -57,6 +59,11 @@ impl KvEngine {
         self.db.get(data_key(user_key))
     }
 
+    /// The underlying database, for MVCC reads (txn::mvcc) on this replica.
+    pub fn db(&self) -> &DB {
+        &self.db
+    }
+
     /// The state machine for `range`, owning user keys in `[start, end)` (`end` empty = +∞).
     pub fn range(
         self: &Arc<Self>,
@@ -74,7 +81,7 @@ impl KvEngine {
     }
 }
 
-/// A user key and its value.
+/// A raw kvdb key and its value.
 type KvPair = (Vec<u8>, Vec<u8>);
 
 #[derive(Serialize, Deserialize)]
@@ -123,32 +130,39 @@ impl RangeStateMachine {
             Command::Put { key, value } => batch.put(data_key(key), value),
             Command::Delete { key } => batch.delete(data_key(key)),
             Command::Batch(cmds) => cmds.iter().for_each(|c| Self::apply_command(batch, c)),
+            // Transaction commands are applied at top level (see `apply`), never inside a Batch.
+            Command::Txn(_) => {}
         }
     }
 
-    fn interval(&self) -> (Vec<u8>, Vec<u8>) {
-        let start = data_key(&self.start);
-        let end = if self.end.is_empty() {
+    /// Raw kvdb intervals this range owns: plain data plus MVCC versions, intents, records and
+    /// the TSO mark. Snapshots carry exactly these.
+    fn owned(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let data_lo = data_key(&self.start);
+        let data_hi = if self.end.is_empty() {
             vec![DATA + 1]
         } else {
             data_key(&self.end)
         };
-        (start, end)
+        let mut spans = vec![(data_lo, data_hi)];
+        spans.extend(mvcc::owned_spans(self.range, &self.start, &self.end));
+        spans
     }
 
     fn pairs(&self) -> Result<Vec<KvPair>, AnyError> {
-        let (start, end) = self.interval();
         let mut out = Vec::new();
-        for item in self
-            .engine
-            .db
-            .iterator(IteratorMode::From(&start, Direction::Forward))
-        {
-            let (k, v) = item.map_err(|e| AnyError::new(&e))?;
-            if k.as_ref() >= end.as_slice() {
-                break;
+        for (lo, hi) in self.owned() {
+            for item in self
+                .engine
+                .db
+                .iterator(IteratorMode::From(&lo, Direction::Forward))
+            {
+                let (k, v) = item.map_err(|e| AnyError::new(&e))?;
+                if k.as_ref() >= hi.as_slice() {
+                    break;
+                }
+                out.push((k.to_vec(), v.to_vec()));
             }
-            out.push((k[1..].to_vec(), v.to_vec()));
         }
         Ok(out)
     }
@@ -206,32 +220,40 @@ impl RaftStateMachine<TypeConfig> for RangeStateMachine {
         I: IntoIterator<Item = Entry> + OptionalSend,
         I::IntoIter: OptionalSend,
     {
-        let mut batch = WriteBatch::default();
+        // One batch per entry, applied index included: transaction commands read the state
+        // the previous entry left, so their conflict checks must see its writes.
         let mut results = Vec::new();
-        let mut last = None;
         for e in entries {
-            match &e.payload {
-                EntryPayload::Blank => {}
-                EntryPayload::Normal(cmd) => Self::apply_command(&mut batch, cmd),
-                EntryPayload::Membership(m) => batch.put(
-                    meta_key(self.range, MEMBERSHIP),
-                    encode(&StoredMembership::new(Some(e.log_id), m.clone()))
-                        .map_err(StorageIOError::write_state_machine)?,
+            let mut batch = WriteBatch::default();
+            let result = match &e.payload {
+                EntryPayload::Blank => CommandResult::Ok,
+                EntryPayload::Normal(Command::Txn(cmd)) => CommandResult::Txn(
+                    mvcc::apply(&self.engine.db, &mut batch, self.range, cmd)
+                        .map_err(|err| StorageIOError::apply(e.log_id, AnyError::error(err)))?,
                 ),
-            }
-            last = Some(e.log_id);
-            results.push(CommandResult);
-        }
-        if let Some(l) = last {
+                EntryPayload::Normal(cmd) => {
+                    Self::apply_command(&mut batch, cmd);
+                    CommandResult::Ok
+                }
+                EntryPayload::Membership(m) => {
+                    batch.put(
+                        meta_key(self.range, MEMBERSHIP),
+                        encode(&StoredMembership::new(Some(e.log_id), m.clone()))
+                            .map_err(StorageIOError::write_state_machine)?,
+                    );
+                    CommandResult::Ok
+                }
+            };
             batch.put(
                 meta_key(self.range, APPLIED),
-                encode(&Some(l)).map_err(StorageIOError::write_state_machine)?,
+                encode(&Some(e.log_id)).map_err(StorageIOError::write_state_machine)?,
             );
+            self.engine
+                .db
+                .write(batch)
+                .map_err(|err| StorageIOError::write_state_machine(&err))?;
+            results.push(result);
         }
-        self.engine
-            .db
-            .write(batch)
-            .map_err(|e| StorageIOError::write_state_machine(&e))?;
         Ok(results)
     }
 
@@ -251,11 +273,12 @@ impl RaftStateMachine<TypeConfig> for RangeStateMachine {
         let data = snapshot.into_inner();
         let parsed: SnapshotData =
             decode(&data).map_err(|e| StorageIOError::read_snapshot(None, e))?;
-        let (start, end) = self.interval();
         let mut batch = WriteBatch::default();
-        batch.delete_range(start, end);
+        for (lo, hi) in self.owned() {
+            batch.delete_range(lo, hi);
+        }
         for (k, v) in &parsed.pairs {
-            batch.put(data_key(k), v);
+            batch.put(k, v);
         }
         batch.put(
             meta_key(self.range, APPLIED),

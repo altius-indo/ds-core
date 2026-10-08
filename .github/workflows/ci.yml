@@ -26,6 +26,23 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked
 
+  # STORY-0028 E2 (REQ-0041 AC2): the release suite on native amd64 and arm64 runners.
+  suite:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - name: Release suite
+        run: cargo deny check && scripts/ci/run-matrix.sh --arch amd64,arm64 --suite release
+
   # STORY-0036: Rust-only/unsafe policy (REQ-0048) and native allow-list (REQ-0049).
   # Each gate also runs its seeded-violation fixtures and fails if they are not rejected.
   policy:

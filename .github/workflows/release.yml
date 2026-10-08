@@ -1,0 +1,52 @@
+name: release
+
+# REQ-0041 AC1 (STORY-0028 E1): server binaries for linux/amd64 and linux/arm64 on every release.
+# Builds natively on each architecture; a tag v* also publishes a GitHub release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install pinned toolchain
+        run: rustup toolchain install && rustup target add ${{ matrix.target }}
+      - name: Package
+        run: scripts/release/package.sh ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/
+
+  check:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - name: E1 release artifacts for both arches
+        run: scripts/release/check-artifacts.sh --targets x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --generate-notes --verify-tag
+    permissions:
+      contents: write

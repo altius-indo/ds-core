@@ -19,7 +19,7 @@ fifo=/tmp/dscore-faults.fifo
 done_fifo=/tmp/dscore-faults-done.fifo
 config=/tmp/dscore-lazyfs.toml
 
-if [[ ! -x "$lazyfs/lazyfs/build/lazyfs" ]]; then
+if [[ ! -e "$lazyfs/lazyfs/build/lazyfs" ]]; then
   rm -rf "$lazyfs"
   git clone --quiet --depth 1 --branch "$version" https://github.com/dsrhaslab/lazyfs "$lazyfs"
   (cd "$lazyfs/libs/libpcache" && ./build.sh > /dev/null)
@@ -49,7 +49,9 @@ log_all_operations=false
 logfile=""
 EOF
 
-"$lazyfs/lazyfs/scripts/mount-lazyfs.sh" -c "$config" -m "$mnt" -r "$backing" > /tmp/dscore-lazyfs.log 2>&1 &
+# The mount script finds the binary relative to its working directory (./build/lazyfs).
+(cd "$lazyfs/lazyfs" && ./scripts/mount-lazyfs.sh -c "$config" -m "$mnt" -r "$backing") \
+  > /tmp/dscore-lazyfs.log 2>&1 &
 for _ in $(seq 1 100); do
   mountpoint -q "$mnt" && break
   sleep 0.1

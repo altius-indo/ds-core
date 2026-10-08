@@ -13,7 +13,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # rustup installs the channel pinned in rust-toolchain.toml.
       - name: Install pinned toolchain
         run: rustup toolchain install
@@ -25,3 +25,24 @@ jobs:
         run: cargo build --workspace --locked
       - name: Test
         run: cargo test --workspace --locked
+
+  # STORY-0036: Rust-only/unsafe policy (REQ-0048) and native allow-list (REQ-0049).
+  # Each gate also runs its seeded-violation fixtures and fails if they are not rejected.
+  policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - name: E1 language and unsafe policy
+        run: scripts/ci/rust-policy.sh --forbid-langs c,cpp,go --require-safety-comments --report-unsafe-count --negative-fixture tests/fixtures/rust-policy
+      - name: E2 native allow-list
+        run: cargo deny check && scripts/ci/ffi-allowlist.sh deny.native.toml --link-audit rustc-link-lib,readelf --negative-fixture tests/fixtures/unlisted-native --require owner,purpose,licence,version,reviewed
+      - name: Unsafe count report
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsafe-count
+          path: target/policy/unsafe-count.json

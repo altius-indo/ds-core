@@ -1,0 +1,46 @@
+# Native (C/C++) libraries that DS-CORE server-side crates may link (REQ-0049, DEC-0011).
+#
+# scripts/ci/ffi-allowlist.sh fails the build when:
+#   - a crate with a Cargo `links` key is not listed here, or its version differs from `version`;
+#   - a build script emits `cargo:rustc-link-lib` for a name not covered by `link_names`
+#     (or by [system]);
+#   - a built binary needs a shared library not covered by `link_names` or [system];
+#   - any entry is missing owner, purpose, licence, version or reviewed (REQ-0049 AC2).
+#
+# `version` must be an exact pin (`=x.y.z`). `link_names` accepts a trailing `*` as a prefix match.
+# Re-review every entry at least yearly; bump `reviewed` when you do.
+
+[[library]]
+name = "rocksdb"
+crate = "librocksdb-sys"
+links = "rocksdb"
+version = "=0.19.0+11.8.1"
+link_names = ["rocksdb", "stdc++", "c++", "c++abi", "atomic"]
+owner = "jsanyal"
+purpose = "Storage engine for the Raft log (raftdb) and state machine (kvdb); see design/raft-ranges.md."
+licence = "Apache-2.0 OR GPL-2.0-only (RocksDB); crate MIT/Apache-2.0/BSD-3-Clause"
+reviewed = "2026-10-07"
+
+[[library]]
+name = "aws-lc"
+crate = "aws-lc-sys"
+links = "aws_lc_0_45_0"
+version = "=0.45.0"
+link_names = ["aws_lc_0_45_0_*"]
+owner = "jsanyal"
+purpose = "FIPS-ready cryptography for TLS/mTLS (rustls aws-lc-rs provider) and encryption at rest."
+licence = "ISC AND Apache-2.0 AND MIT AND BSD-3-Clause (per crate metadata)"
+reviewed = "2026-10-07"
+
+# Platform libraries every Rust binary may depend on. Not native dependencies we choose.
+[system]
+link_names = [
+  "c", "m", "dl", "pthread", "rt", "util", "gcc_s", "resolv",
+  "System", "iconv", "objc",
+]
+shared = [
+  "libc.so*", "libm.so*", "libdl.so*", "libpthread.so*", "librt.so*", "libutil.so*",
+  "libgcc_s.so*", "ld-linux*", "linux-vdso*",
+  "/usr/lib/libSystem.B.dylib", "/usr/lib/libiconv*.dylib", "/usr/lib/libobjc*.dylib",
+  "/System/Library/Frameworks/*",
+]

@@ -1,0 +1,14 @@
+# Seeded violation for scripts/ci/ffi-allowlist.sh: a crate that links a native library
+# that is not on deny.native.toml (REQ-0049 AC1). Standalone; not a workspace member.
+[package]
+name = "unlisted-native"
+version = "0.0.0"
+edition = "2024"
+publish = false
+links = "unlisted_native"
+build = "build.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[workspace]

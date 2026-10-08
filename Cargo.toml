@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = ["server", "importer", "harness"]
+# Seeded-violation fixtures for the CI policy gates; never built as part of the workspace.
+exclude = ["tests/fixtures"]
 
 [workspace.package]
 version = "0.1.0"

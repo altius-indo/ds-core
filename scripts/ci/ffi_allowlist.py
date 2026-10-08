@@ -64,8 +64,7 @@ def link_name(spec):
     return name.split(":", 1)[0]
 
 
-# Platforms DS-CORE ships for (REQ-0041). Dependencies resolved only for other platforms
-# (e.g. wasm-bindgen under a wasm32 cfg) are never built, so they are not checked.
+# Platforms DS-CORE ships for (REQ-0041), checked alongside the host.
 RELEASE_TARGETS = ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu")
 
 
@@ -74,20 +73,36 @@ def host_target():
     return next(l.split(": ", 1)[1] for l in out.splitlines() if l.startswith("host: "))
 
 
-def check_links_keys(manifest, libs):
-    packages, resolved = {}, set()
+def built_packages(manifest):
+    """(name, version) of every package compiled for the host or a release target.
+
+    `cargo metadata` lists optional dependencies whose features are never enabled (e.g.
+    rustls-webpki's `ring`) and dependencies for other platforms (e.g. wasm-bindgen), so the
+    set comes from `cargo tree`, which applies real feature resolution per target.
+    """
+    built = set()
     for platform in sorted({host_target(), *RELEASE_TARGETS}):
         out = subprocess.run(
-            ["cargo", "metadata", "--format-version", "1", "--locked", "--filter-platform", platform,
-             "--manifest-path", manifest],
+            ["cargo", "tree", "--locked", "--workspace", "-e", "normal,build,dev", "--target", platform,
+             "--prefix", "none", "--format", "{p}", "--manifest-path", manifest],
             check=True, capture_output=True, text=True,
         ).stdout
-        meta = json.loads(out)
-        packages.update((p["id"], p) for p in meta["packages"])
-        resolved |= {n["id"] for n in (meta.get("resolve") or {}).get("nodes", [])}
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[1].startswith("v"):
+                built.add((parts[0], parts[1][1:]))
+    return built
+
+
+def check_links_keys(manifest, libs):
+    meta = json.loads(subprocess.run(
+        ["cargo", "metadata", "--format-version", "1", "--locked", "--manifest-path", manifest],
+        check=True, capture_output=True, text=True,
+    ).stdout)
+    built = built_packages(manifest)
     errors = []
-    for pkg in packages.values():
-        if not pkg.get("links") or pkg["id"] not in resolved:
+    for pkg in meta["packages"]:
+        if not pkg.get("links") or (pkg["name"], pkg["version"]) not in built:
             continue
         entry = next((l for l in libs if l.get("links") == pkg["links"] and l.get("crate") == pkg["name"]), None)
         if entry is None:

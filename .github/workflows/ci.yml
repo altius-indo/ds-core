@@ -43,6 +43,18 @@ jobs:
       - name: Release suite
         run: cargo deny check && scripts/ci/run-matrix.sh --arch amd64,arm64 --suite release
 
+  # STORY-0021: TLS policy scan of client and peer ports (REQ-0035) and mTLS refusal (REQ-0036).
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+      - name: E1 TLS scan and plaintext refusal
+        run: scripts/security/tls-scan.sh --ports client,peer --forbid sslv3,tls1.0,tls1.1,non-aead --expect-plaintext-refused
+      - name: E2 peer certificate rejection
+        run: cargo test --locked -p dscore-server --test security -- mtls_reject_invalid_peer
+
   # STORY-0036: Rust-only/unsafe policy (REQ-0048) and native allow-list (REQ-0049).
   # Each gate also runs its seeded-violation fixtures and fails if they are not rejected.
   policy:

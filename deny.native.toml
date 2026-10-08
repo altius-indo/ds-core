@@ -32,6 +32,19 @@ purpose = "FIPS-ready cryptography for TLS/mTLS (rustls aws-lc-rs provider) and 
 licence = "ISC AND Apache-2.0 AND MIT AND BSD-3-Clause (per crate metadata)"
 reviewed = "2026-10-07"
 
+# The safe Rust wrapper over aws-lc-sys. Its `links` key only guarantees a single copy per
+# build; the native code is aws-lc-sys above. Pinned together with it.
+[[library]]
+name = "aws-lc (Rust wrapper)"
+crate = "aws-lc-rs"
+links = "aws_lc_rs_1_18_1_sys"
+version = "=1.18.1"
+link_names = []
+owner = "jsanyal"
+purpose = "Crypto provider for rustls (server/src/net/tls.rs); wraps aws-lc-sys."
+licence = "ISC AND (Apache-2.0 OR ISC)"
+reviewed = "2026-10-07"
+
 # Platform libraries every Rust binary may depend on. Not native dependencies we choose.
 [system]
 link_names = [

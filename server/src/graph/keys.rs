@@ -112,6 +112,25 @@ pub fn prefix_end(prefix: &[u8]) -> Vec<u8> {
     Vec::new()
 }
 
+/// `[start, end)` covering every node (and its adjacency) of graph `g`.
+pub fn graph_nodes_span(g: GraphId) -> (Vec<u8>, Vec<u8>) {
+    let mut start = graph_prefix(g);
+    start.push(NODE);
+    let end = prefix_end(&start);
+    (start, end)
+}
+
+/// The node id if `key` is a node document key of graph `g`.
+pub fn decode_node_doc(g: GraphId, key: &[u8]) -> Option<NodeId> {
+    let p = graph_prefix(g);
+    let rest = key.strip_prefix(p.as_slice())?.strip_prefix(&[NODE])?;
+    if rest.len() == 9 && rest[8] == DOC {
+        Some(NodeId::from_be_bytes(rest[..8].try_into().ok()?))
+    } else {
+        None
+    }
+}
+
 /// Decoded edge key: (at, direction, type, other, rank).
 pub fn decode_edge(g: GraphId, key: &[u8]) -> Option<(NodeId, Direction, TypeId, NodeId, u64)> {
     let p = graph_prefix(g);

@@ -325,3 +325,58 @@ impl Graph {
         Ok(Some(removed))
     }
 }
+
+// ---------------------------------------------------------------------- node updates and scans
+
+impl Graph {
+    /// Replace a node's labels and properties (SET / REMOVE). The node must exist.
+    pub async fn update_node(
+        &self,
+        txn: &mut Txn,
+        id: NodeId,
+        labels: &[String],
+        properties: &Record,
+    ) -> Result<(), DsError> {
+        self.limits.check_document(properties).map_err(invalid)?;
+        let key = keys::node_doc(self.id, id);
+        if txn.get(&key).await?.is_none() {
+            return Err(invalid(format!("node {id} does not exist")));
+        }
+        let mut label_ids = Vec::with_capacity(labels.len());
+        for l in labels {
+            label_ids.push(self.intern(txn, LABEL, l).await?);
+        }
+        label_ids.sort_unstable();
+        label_ids.dedup();
+        let doc = NodeDoc {
+            labels: label_ids,
+            properties: properties.encode(),
+        };
+        txn.put(&key, &postcard::to_allocvec(&doc).map_err(bad_data)?);
+        Ok(())
+    }
+
+    /// Every node of the graph, in id order. A full scan: v1 has no label index yet
+    /// (property indexes arrive with TASK-0020).
+    pub async fn scan_nodes(&self, txn: &mut Txn) -> Result<Vec<Node>, DsError> {
+        let (start, end) = keys::graph_nodes_span(self.id);
+        let mut out = Vec::new();
+        for (k, v) in txn.scan(&start, &end).await? {
+            let Some(id) = keys::decode_node_doc(self.id, &k) else {
+                continue;
+            };
+            let doc: NodeDoc = postcard::from_bytes(&v).map_err(bad_data)?;
+            let mut labels = Vec::with_capacity(doc.labels.len());
+            for l in doc.labels {
+                labels.push(self.name_of(txn, LABEL, l).await?);
+            }
+            labels.sort();
+            out.push(Node {
+                id,
+                labels,
+                properties: Record::decode(&doc.properties).map_err(bad_data)?,
+            });
+        }
+        Ok(out)
+    }
+}

@@ -1,8 +1,8 @@
 name: durability
 
-# STORY-0001 E2 (REQ-0016 AC1): acknowledged writes survive simultaneous power loss of every
-# node, simulated with LazyFS clear-cache. Pushes run a short regression; the nightly run
-# and manual dispatch run the full 1,000 trials the eval requires.
+# Fault-injection and Jepsen-style evals (dscore-harness). Pushes run short regressions; the
+# nightly run and manual dispatch run the full lengths the evals specify. Each eval is its
+# own job so they run in parallel with their own time limits.
 on:
   push:
     branches: [main]
@@ -10,9 +10,10 @@ on:
     - cron: "0 3 * * *"
   workflow_dispatch:
     inputs:
-      trials:
-        description: Power-cut trials
-        default: "1000"
+      full:
+        description: Run full-length evals (1000 power cuts, 100 leader kills, 1 h Jepsen runs)
+        type: boolean
+        default: true
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
@@ -20,11 +21,13 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  FULL: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.full) }}
 
 jobs:
+  # STORY-0001 E2 (REQ-0016 AC1): power-cut durability on LazyFS.
   power-cut:
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v5
       - name: Install pinned toolchain
@@ -40,18 +43,49 @@ jobs:
           path: ~/.cache/lazyfs-0.3.1
           key: lazyfs-0.3.1-${{ runner.os }}
       - name: E2 power-cut durability
-        run: scripts/ci/lazyfs-powercut.sh "${{ github.event_name == 'push' && '25' || github.event.inputs.trials || '1000' }}"
-      - name: STORY-0003 E1 leader-kill failover p99
+        run: scripts/ci/lazyfs-powercut.sh "${{ env.FULL == 'true' && '1000' || '25' }}"
+
+  # STORY-0003 E1 (REQ-0018 AC1): leader-kill failover p99.
+  leader-kill:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: E1 leader-kill failover p99
         run: |
           cargo build --quiet --release --locked -p dscore-harness
-          target/release/dscore-harness fault leader-kill --trials "${{ github.event_name == 'push' && '10' || '100' }}" --assert-p99-secs 10
-      - name: STORY-0002 E1 membership churn
-        run: target/release/dscore-harness jepsen --workload membership --duration "${{ github.event_name == 'push' && '2m' || '1h' }}" --check single-leader,learner-promotion
-      - name: STORY-0007 E2 one-sided edge check
+          target/release/dscore-harness fault leader-kill --trials "${{ env.FULL == 'true' && '100' || '10' }}" --assert-p99-secs 10
+
+  # STORY-0002 E1, STORY-0007 E2, STORY-0006 E4: Jepsen-style workloads.
+  jepsen:
+    strategy:
+      fail-fast: false
+      matrix:
+        workload: [membership, edges, register]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Build harness
+        run: cargo build --quiet --release --locked -p dscore-harness
+      - name: Run ${{ matrix.workload }}
+        env:
+          DURATION: ${{ env.FULL == 'true' && '1h' || '2m' }}
         run: |
-          target/release/dscore-harness jepsen --workload edges --duration 15s --check bidirectional --unsafe-split-writes --expect-violations
-          target/release/dscore-harness jepsen --workload edges --duration "${{ github.event_name == 'push' && '2m' || '1h' }}" --check bidirectional
-      - name: STORY-0006 E4 register with internal retry
-        run: |
-          target/release/dscore-harness jepsen --workload register --internal-retry on --duration "${{ github.event_name == 'push' && '2m' || '1h' }}" --check lost-update,serializable
-          target/release/dscore-harness jepsen --workload register --internal-retry off --duration 30s --check lost-update,serializable
+          h=target/release/dscore-harness
+          case "${{ matrix.workload }}" in
+            membership)
+              $h jepsen --workload membership --duration "$DURATION" --check single-leader,learner-promotion ;;
+            edges)
+              $h jepsen --workload edges --duration 15s --check bidirectional --unsafe-split-writes --expect-violations
+              $h jepsen --workload edges --duration "$DURATION" --check bidirectional ;;
+            register)
+              $h jepsen --workload register --internal-retry on --duration "$DURATION" --check lost-update,serializable
+              $h jepsen --workload register --internal-retry off --duration 30s --check lost-update,serializable ;;
+          esac

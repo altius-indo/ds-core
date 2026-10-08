@@ -12,6 +12,9 @@
 //!   dscore-harness jepsen --workload edges --duration 1h --check bidirectional \
 //!       [--seed N] [--unsafe-split-writes --expect-violations]
 //!
+//!   dscore-harness jepsen --workload register --internal-retry on|off --duration 1h \
+//!       --check lost-update,serializable
+//!
 //! See powercut.rs, leaderkill.rs and membership_churn.rs for the methods. `node-group` is
 //! the child process the power-cut fault drives.
 
@@ -20,6 +23,7 @@ mod leaderkill;
 mod membership_churn;
 mod node_group;
 mod powercut;
+mod register;
 
 /// Parse `90s`, `10m`, `1h` (or plain seconds).
 fn parse_duration(s: &str) -> Option<std::time::Duration> {
@@ -38,8 +42,11 @@ async fn jepsen(args: &[String]) -> ExitCode {
     match flag_value(args, "--workload").as_deref() {
         Some("membership") => {}
         Some("edges") => return jepsen_edges(args).await,
+        Some("register") => return jepsen_register(args).await,
         other => {
-            eprintln!("jepsen: unsupported workload {other:?}; available: membership, edges");
+            eprintln!(
+                "jepsen: unsupported workload {other:?}; available: membership, edges, register"
+            );
             return ExitCode::from(2);
         }
     }
@@ -177,6 +184,45 @@ async fn power_cut(args: &[String]) -> ExitCode {
         }
         Err(e) => {
             eprintln!("power-cut: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn jepsen_register(args: &[String]) -> ExitCode {
+    let Some(duration) = flag_value(args, "--duration")
+        .as_deref()
+        .and_then(parse_duration)
+    else {
+        return usage();
+    };
+    let internal_retry = flag_value(args, "--internal-retry").as_deref() != Some("off");
+    let checks = flag_value(args, "--check").unwrap_or_else(|| "lost-update,serializable".into());
+    match register::run(duration, internal_retry).await {
+        Ok(r) => {
+            println!(
+                "register: {duration:?} internal-retry {}: {} acknowledged increments, {} internal retries, \
+                 {} conflicts returned to clients, checks [{checks}]",
+                if internal_retry { "on" } else { "off" },
+                r.acknowledged,
+                r.retries,
+                r.conflicts_returned
+            );
+            let relevant: Vec<_> = r
+                .violations
+                .iter()
+                .filter(|v| checks.split(',').any(|c| v.starts_with(c)))
+                .collect();
+            for v in &relevant {
+                eprintln!("violation: {v}");
+            }
+            if !relevant.is_empty() || r.acknowledged == 0 {
+                return ExitCode::FAILURE;
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("jepsen register: {e}");
             ExitCode::FAILURE
         }
     }

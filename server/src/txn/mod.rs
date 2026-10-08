@@ -4,4 +4,5 @@ pub mod cluster;
 pub mod coordinator;
 pub mod error;
 pub mod mvcc;
+pub mod retry;
 pub mod tso;

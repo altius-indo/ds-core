@@ -2,7 +2,8 @@
 //!
 //! A transaction reads at `start_ts`, buffers its writes and commits:
 //!   - read-only: nothing to do; a snapshot at `start_ts` is serializable (§6.2);
-//!   - one range touched: a single `OnePhase` command validates and writes (§5, 1PC);
+//!   - one range touched: prewrite (intents + record), take `commit_ts`, then a single
+//!     `CommitLocal` entry validates, commits and resolves;
 //!   - several ranges: Percolator-style 2PC. Prewrite the anchor range (creating the PENDING
 //!     record), then the others; take `commit_ts`; validate every read span; flip the record
 //!     to COMMITTED (the commit point); resolve intents. A heartbeat keeps the record alive.
@@ -369,22 +370,6 @@ impl Txn {
             .copied()
             .collect();
 
-        if touched.len() == 1 && crash.is_none() {
-            let range = *touched.iter().next().expect("one range");
-            let commit_ts = self.client.tso.next().await?;
-            let cmd = TxnCommand::OnePhase {
-                start_ts: self.meta.start_ts,
-                commit_ts,
-                reads: reads_by_range.remove(&range).unwrap_or_default(),
-                writes: writes_by_range.remove(&range).unwrap_or_default(),
-            };
-            return match cluster.propose(range, cmd).await? {
-                TxnResponse::Ok => Ok(commit_ts),
-                TxnResponse::Conflict(c) => Err(DsError::conflict(conflict_message(&c))),
-                other => Err(internal(format!("one-phase commit: {other:?}"))),
-            };
-        }
-
         // 2PC. The anchor is the first written key; its range holds the record.
         self.meta.anchor = self
             .writes
@@ -473,6 +458,31 @@ impl Txn {
 
         // The commit timestamp is taken strictly after every intent is durable (§6.1).
         let commit_ts = self.client.tso.next().await?;
+
+        // One range: validate, commit and resolve in a single entry.
+        if touched.len() == 1 && crash.is_none() {
+            let cmd = TxnCommand::CommitLocal {
+                id: self.meta.id,
+                start_ts: self.meta.start_ts,
+                commit_ts,
+                reads: reads_by_range.remove(&anchor_range).unwrap_or_default(),
+                keys: writes_by_range[&anchor_range]
+                    .iter()
+                    .map(|(k, _)| k.clone())
+                    .collect(),
+            };
+            let result = cluster.propose(anchor_range, cmd).await;
+            heartbeat_stop.store(true, Ordering::Relaxed);
+            return match result? {
+                TxnResponse::Ok => Ok(commit_ts),
+                TxnResponse::Conflict(c) => {
+                    self.rollback(&prewritten, &writes_by_range, anchor_range, &heartbeat_stop)
+                        .await;
+                    Err(DsError::conflict(conflict_message(&c)))
+                }
+                other => Err(internal(format!("local commit: {other:?}"))),
+            };
+        }
         for (range, spans) in &reads_by_range {
             let cmd = TxnCommand::Validate {
                 id: self.meta.id,

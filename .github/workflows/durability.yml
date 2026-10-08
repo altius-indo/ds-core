@@ -51,3 +51,7 @@ jobs:
         run: |
           target/release/dscore-harness jepsen --workload edges --duration 15s --check bidirectional --unsafe-split-writes --expect-violations
           target/release/dscore-harness jepsen --workload edges --duration "${{ github.event_name == 'push' && '2m' || '1h' }}" --check bidirectional
+      - name: STORY-0006 E4 register with internal retry
+        run: |
+          target/release/dscore-harness jepsen --workload register --internal-retry on --duration "${{ github.event_name == 'push' && '2m' || '1h' }}" --check lost-update,serializable
+          target/release/dscore-harness jepsen --workload register --internal-retry off --duration 30s --check lost-update,serializable

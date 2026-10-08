@@ -115,12 +115,16 @@ pub enum TxnCommand {
         commit_ts: Ts,
         spans: Vec<Span>,
     },
-    /// Single-range fast path: validate and write committed versions in one entry.
-    OnePhase {
+    /// Single-range commit, after `Prewrite` (with record) on the same range: validate the
+    /// reads, confirm the record is still PENDING, mark it COMMITTED and turn the intents on
+    /// `keys` into versions, all in one entry. The intents were durable before `commit_ts` was
+    /// taken, which is what makes a later reader see (and wait for) this transaction (§6.1).
+    CommitLocal {
+        id: TxnId,
         start_ts: Ts,
         commit_ts: Ts,
         reads: Vec<Span>,
-        writes: Vec<Write>,
+        keys: Vec<Vec<u8>>,
     },
     /// Raise the timestamp oracle's persisted high-water mark (never lowers it).
     TsoAdvance {
@@ -575,33 +579,36 @@ pub fn apply(
             Some(c) => TxnResponse::Conflict(c),
             None => TxnResponse::Ok,
         },
-        TxnCommand::OnePhase {
+        TxnCommand::CommitLocal {
+            id,
             start_ts,
             commit_ts,
             reads,
-            writes,
+            keys,
         } => {
-            if let Some(c) = validate_spans(db, None, *start_ts, *commit_ts, reads)? {
+            let mut record = match get_record(db, range, *id)? {
+                Some(
+                    r @ TxnRecord {
+                        status: TxnStatus::Pending { .. },
+                        ..
+                    },
+                ) => r,
+                _ => return Ok(TxnResponse::Conflict(Conflict::Aborted)),
+            };
+            if let Some(c) = validate_spans(db, Some(*id), *start_ts, *commit_ts, reads)? {
                 return Ok(TxnResponse::Conflict(c));
             }
-            for (key, _) in writes {
-                if let Some(other) = get_intent(db, key)? {
-                    return Ok(TxnResponse::Conflict(Conflict::Intent {
-                        key: key.clone(),
-                        holder: other.txn,
-                    }));
-                }
-                if let (_, Some(newest)) = newest_version(db, key, Ts::MAX)?
-                    && newest > *start_ts
+            record.status = TxnStatus::Committed {
+                commit_ts: *commit_ts,
+            };
+            batch.put(record_key(range, *id), enc(&record));
+            for key in keys {
+                if let Some(intent) = get_intent(db, key)?
+                    && intent.txn.id == *id
                 {
-                    return Ok(TxnResponse::Conflict(Conflict::NewerVersion {
-                        key: key.clone(),
-                        commit_ts: newest,
-                    }));
+                    batch.delete(intent_key(key));
+                    batch.put(version_key(key, *commit_ts), enc(&intent.value));
                 }
-            }
-            for (key, value) in writes {
-                batch.put(version_key(key, *commit_ts), enc(value));
             }
             TxnResponse::Ok
         }

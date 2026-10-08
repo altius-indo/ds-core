@@ -227,3 +227,68 @@ async fn coordinator_crash_atomic() {
         );
     }
 }
+
+mod retry {
+    use super::*;
+    use dscore_server::txn::retry::{RetryPolicy, autocommit};
+
+    async fn increment(client: &TxnClient, key: &'static [u8]) -> u32 {
+        autocommit(
+            client,
+            RetryPolicy {
+                max_attempts: 50,
+                ..RetryPolicy::default()
+            },
+            |mut t| async move {
+                let n = match t.get(key).await? {
+                    Some(b) => u64::from_be_bytes(b.as_slice().try_into().unwrap()),
+                    None => 0,
+                };
+                t.put(key, &(n + 1).to_be_bytes());
+                Ok(((), t))
+            },
+        )
+        .await
+        .unwrap()
+        .attempts
+    }
+
+    // reqforge: verifies REQ-0015#AC2
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn autocommit_retry_loses_no_updates() {
+        let e = env().await;
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let client = e.client.clone();
+            tasks.push(tokio::spawn(async move {
+                let mut retried = 0;
+                for _ in 0..10 {
+                    retried += increment(&client, b"counter").await - 1;
+                }
+                retried
+            }));
+        }
+        let mut retries = 0;
+        for t in tasks {
+            retries += t.await.unwrap();
+        }
+        let mut t = e.client.begin().await.unwrap();
+        let v = u64::from_be_bytes(
+            t.get(b"counter")
+                .await
+                .unwrap()
+                .unwrap()
+                .as_slice()
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(
+            v, 80,
+            "every acknowledged increment is counted exactly once"
+        );
+        assert!(
+            retries > 0,
+            "the workload should have produced conflicts to retry"
+        );
+    }
+}

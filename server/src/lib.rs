@@ -1,5 +1,6 @@
 //! DS-CORE server library.
 
+pub mod gql;
 pub mod graph;
 pub mod net;
 pub mod raft;

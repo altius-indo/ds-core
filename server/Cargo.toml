@@ -35,3 +35,9 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc
 opentelemetry_sdk = { version = "0.33", default-features = false, features = ["metrics", "trace", "testing"] }
 rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
 tempfile = "3"
+toml = "0.9"
+
+[[test]]
+# Takes `--matrix docs/gql-conformance.toml` (STORY-0010 E2), so it has its own main.
+name = "gql_conformance"
+harness = false

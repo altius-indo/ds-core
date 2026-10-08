@@ -64,16 +64,30 @@ def link_name(spec):
     return name.split(":", 1)[0]
 
 
+# Platforms DS-CORE ships for (REQ-0041). Dependencies resolved only for other platforms
+# (e.g. wasm-bindgen under a wasm32 cfg) are never built, so they are not checked.
+RELEASE_TARGETS = ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu")
+
+
+def host_target():
+    out = subprocess.run(["rustc", "-vV"], check=True, capture_output=True, text=True).stdout
+    return next(l.split(": ", 1)[1] for l in out.splitlines() if l.startswith("host: "))
+
+
 def check_links_keys(manifest, libs):
-    out = subprocess.run(
-        ["cargo", "metadata", "--format-version", "1", "--locked", "--manifest-path", manifest],
-        check=True, capture_output=True, text=True,
-    ).stdout
-    meta = json.loads(out)
-    resolved = {n["id"] for n in (meta.get("resolve") or {}).get("nodes", [])}
+    packages, resolved = {}, set()
+    for platform in sorted({host_target(), *RELEASE_TARGETS}):
+        out = subprocess.run(
+            ["cargo", "metadata", "--format-version", "1", "--locked", "--filter-platform", platform,
+             "--manifest-path", manifest],
+            check=True, capture_output=True, text=True,
+        ).stdout
+        meta = json.loads(out)
+        packages.update((p["id"], p) for p in meta["packages"])
+        resolved |= {n["id"] for n in (meta.get("resolve") or {}).get("nodes", [])}
     errors = []
-    for pkg in meta["packages"]:
-        if not pkg.get("links") or (resolved and pkg["id"] not in resolved):
+    for pkg in packages.values():
+        if not pkg.get("links") or pkg["id"] not in resolved:
             continue
         entry = next((l for l in libs if l.get("links") == pkg["links"] and l.get("crate") == pkg["name"]), None)
         if entry is None:

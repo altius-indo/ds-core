@@ -268,6 +268,18 @@ async fn partition_one_voter_plus_learners_no_ack() {
     }
 }
 
+/// Reopen a database after `shutdown()`. openraft's tasks drop their storage handles shortly
+/// after shutdown returns, and RocksDB keeps its file lock until the last handle is gone.
+async fn reopen<T, E: std::fmt::Debug>(open: impl Fn() -> Result<T, E>) -> T {
+    for _ in 0..200 {
+        if let Ok(v) = open() {
+            return v;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    open().expect("database still locked 5 s after shutdown")
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn state_survives_reopen() {
     let dir = TempDir::new().unwrap();
@@ -295,8 +307,8 @@ async fn state_survives_reopen() {
         raft.shutdown().await.unwrap();
     }
     // Reopen both databases: the log and applied state come back, and the node leads again.
-    let logs = LogEngine::open(&dir.path().join("raftdb")).unwrap();
-    let kv = KvEngine::open(&dir.path().join("kvdb")).unwrap();
+    let logs = reopen(|| LogEngine::open(&dir.path().join("raftdb"))).await;
+    let kv = reopen(|| KvEngine::open(&dir.path().join("kvdb"))).await;
     assert_eq!(kv.get(b"k").unwrap().as_deref(), Some(&b"v"[..]));
     let net = RouterNetwork { router, from: 1 };
     let raft = start_range(1, 1, Vec::new(), Vec::new(), test_config(), &logs, &kv, net)

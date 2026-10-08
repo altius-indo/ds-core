@@ -6,12 +6,94 @@
 //!
 //!   dscore-harness fault leader-kill --trials 100 --assert-p99-secs 10
 //!
-//! See powercut.rs and leaderkill.rs for the methods. `node-group` is the child process the
-//! power-cut fault drives.
+//!   dscore-harness jepsen --workload membership --duration 1h \
+//!       --check single-leader,learner-promotion [--max-lag 1000] [--seed N]
+//!
+//! See powercut.rs, leaderkill.rs and membership_churn.rs for the methods. `node-group` is
+//! the child process the power-cut fault drives.
 
 mod leaderkill;
+mod membership_churn;
 mod node_group;
 mod powercut;
+
+/// Parse `90s`, `10m`, `1h` (or plain seconds).
+fn parse_duration(s: &str) -> Option<std::time::Duration> {
+    let (num, unit) = s.split_at(s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()));
+    let n: u64 = num.parse().ok()?;
+    let secs = match unit {
+        "" | "s" => n,
+        "m" => n * 60,
+        "h" => n * 3600,
+        _ => return None,
+    };
+    Some(std::time::Duration::from_secs(secs))
+}
+
+async fn jepsen(args: &[String]) -> ExitCode {
+    match flag_value(args, "--workload").as_deref() {
+        Some("membership") => {}
+        other => {
+            eprintln!("jepsen: unsupported workload {other:?}; available: membership");
+            return ExitCode::from(2);
+        }
+    }
+    let Some(duration) = flag_value(args, "--duration")
+        .as_deref()
+        .and_then(parse_duration)
+    else {
+        return usage();
+    };
+    let max_lag = flag_value(args, "--max-lag")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(dscore_server::raft::membership::DEFAULT_MAX_PROMOTE_LAG);
+    let seed = flag_value(args, "--seed")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| std::process::id() as u64);
+    let checks =
+        flag_value(args, "--check").unwrap_or_else(|| "single-leader,learner-promotion".into());
+    match membership_churn::run(duration, max_lag, seed).await {
+        Ok(r) => {
+            let max_seen = r.promotions.iter().map(|(_, l)| *l).max().unwrap_or(0);
+            println!(
+                "membership: {:?} seed {seed}: {} writes, {} promotions (max lag {max_seen}; observer saw {}, \
+                 {} unmeasured), {} removals, {} terms observed, checks [{checks}]",
+                duration,
+                r.writes_ok,
+                r.promotions.len(),
+                r.observed_promotions,
+                r.unmeasured_promotions,
+                r.removals,
+                r.terms_observed
+            );
+            let relevant: Vec<_> = r
+                .violations
+                .iter()
+                .filter(|v| {
+                    (checks.contains("single-leader") && v.contains("AC1"))
+                        || (checks.contains("learner-promotion") && v.contains("AC2"))
+                })
+                .collect();
+            for v in &relevant {
+                eprintln!("violation: {v}");
+            }
+            if !relevant.is_empty() {
+                return ExitCode::FAILURE;
+            }
+            if r.promotions.is_empty() {
+                eprintln!(
+                    "FAIL: no membership change completed; the workload did not exercise anything"
+                );
+                return ExitCode::FAILURE;
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("jepsen: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -157,6 +239,7 @@ async fn main() -> ExitCode {
         }
         ["fault", "power-cut", ..] => power_cut(&args[2..]).await,
         ["fault", "leader-kill", ..] => leader_kill(&args[2..]).await,
+        ["jepsen", ..] => jepsen(&args[1..]).await,
         ["node-group", ..] => {
             let Some(dir) = flag_value(&args, "--dir") else {
                 return usage();

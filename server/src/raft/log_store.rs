@@ -80,7 +80,10 @@ impl LogEngine {
         opts.create_if_missing(true);
         let db = Arc::new(DB::open(&opts, path)?);
         let (tx, rx) = mpsc::channel::<Flush>();
-        let writer_db = db.clone();
+        // Weak: the writer must never be what keeps the database open. The DB closes when the
+        // last LogEngine handle drops, on that thread, not at process exit (closing RocksDB
+        // during static destruction aborts the process).
+        let writer_db = Arc::downgrade(&db);
         thread::Builder::new()
             .name("raft-log-fsync".into())
             .spawn(move || {
@@ -88,20 +91,18 @@ impl LogEngine {
                 while let Ok(first) = rx.recv() {
                     let mut pending = vec![first];
                     pending.extend(rx.try_iter());
-                    let result = if sync_wal {
-                        writer_db.flush_wal(true)
-                    } else {
-                        Ok(())
+                    let result: Result<(), String> = match writer_db.upgrade() {
+                        Some(db) if sync_wal => db.flush_wal(true).map_err(|e| e.to_string()),
+                        Some(_) => Ok(()),
+                        None => Err("raft log database is closed".into()),
                     };
                     for p in pending {
                         match p {
-                            Flush::Log(cb) => cb.log_io_completed(
-                                result
-                                    .clone()
-                                    .map_err(|e| std::io::Error::other(e.to_string())),
-                            ),
+                            Flush::Log(cb) => {
+                                cb.log_io_completed(result.clone().map_err(std::io::Error::other))
+                            }
                             Flush::Notify(tx) => {
-                                let _ = tx.send(result.clone().map_err(|e| e.to_string()));
+                                let _ = tx.send(result.clone());
                             }
                         }
                     }

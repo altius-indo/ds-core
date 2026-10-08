@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod log_store;
+pub mod membership;
 pub mod network;
 pub mod placement;
 pub mod state_machine;

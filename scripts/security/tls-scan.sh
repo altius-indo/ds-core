@@ -73,12 +73,16 @@ for p in "${port_list[@]}"; do
   [[ $plaintext -eq 1 ]] && probes+=(plaintext)
   python3 "$root/scripts/security/tls_probe.py" "$host" "$port" "${probes[@]}" || fail=1
 
-  if out="$(openssl s_client -connect "$addr" -tls1_3 -CAfile ca.pem -verify_return_error \
-        -servername localhost ${cert_args[@]+"${cert_args[@]}"} < /dev/null 2>&1)" \
-     && grep -q "Protocol *: *TLSv1.3" <<< "$out"; then
+  # Judge the handshake by its output, not s_client's exit status: some OpenSSL builds exit
+  # non-zero when the server closes right after the handshake.
+  out="$(openssl s_client -connect "$addr" -tls1_3 -CAfile ca.pem -verify_return_error \
+        -servername localhost ${cert_args[@]+"${cert_args[@]}"} < /dev/null 2>&1 || true)"
+  if grep -qE "(Protocol *: *TLSv1\.3|New, TLSv1\.3)" <<< "$out" \
+     && grep -q "Verify return code: 0 (ok)" <<< "$out"; then
     echo "ok   $addr tls1.3 handshake ($p port)"
   else
-    echo "FAIL $addr tls1.3 handshake ($p port)"
+    echo "FAIL $addr tls1.3 handshake ($p port); openssl output:"
+    sed 's/^/    /' <<< "$out" | tail -20
     fail=1
   fi
 done

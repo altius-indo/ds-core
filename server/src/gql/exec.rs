@@ -494,7 +494,9 @@ impl<'a> Executor<'a> {
                                 }
                                 Some(Binding::Value(Value::Null)) | Some(_) => {}
                                 None => {
-                                    return Err(semantic(format!("DELETE: unbound variable `{v}`")));
+                                    return Err(semantic(format!(
+                                        "DELETE: unbound variable `{v}`"
+                                    )));
                                 }
                             }
                         }
@@ -1267,7 +1269,9 @@ impl<'a> Executor<'a> {
                                     None if *op == BinOp::Eq => Value::Bool(false),
                                     None if *op == BinOp::Ne => Value::Bool(true),
                                     None => {
-                                        return Err(data(format!("cannot compare {x:?} and {y:?}")));
+                                        return Err(data(format!(
+                                            "cannot compare {x:?} and {y:?}"
+                                        )));
                                     }
                                 }
                             }

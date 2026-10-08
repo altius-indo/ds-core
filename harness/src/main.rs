@@ -15,11 +15,15 @@
 //!   dscore-harness jepsen --workload register --internal-retry on|off --duration 1h \
 //!       --check lost-update,serializable
 //!
+//!   dscore-harness jepsen --workload list-append --nemesis partition,crash,clock \
+//!       --duration 1h --check serializable [--elle-jar PATH | ELLE_JAR] [--history FILE]
+//!
 //! See powercut.rs, leaderkill.rs and membership_churn.rs for the methods. `node-group` is
 //! the child process the power-cut fault drives.
 
 mod edges;
 mod leaderkill;
+mod list_append;
 mod membership_churn;
 mod node_group;
 mod powercut;
@@ -43,9 +47,10 @@ async fn jepsen(args: &[String]) -> ExitCode {
         Some("membership") => {}
         Some("edges") => return jepsen_edges(args).await,
         Some("register") => return jepsen_register(args).await,
+        Some("list-append") => return jepsen_list_append(args).await,
         other => {
             eprintln!(
-                "jepsen: unsupported workload {other:?}; available: membership, edges, register"
+                "jepsen: unsupported workload {other:?}; available: membership, edges, register, list-append"
             );
             return ExitCode::from(2);
         }
@@ -184,6 +189,74 @@ async fn power_cut(args: &[String]) -> ExitCode {
         }
         Err(e) => {
             eprintln!("power-cut: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn jepsen_list_append(args: &[String]) -> ExitCode {
+    let Some(duration) = flag_value(args, "--duration")
+        .as_deref()
+        .and_then(parse_duration)
+    else {
+        return usage();
+    };
+    let nemeses =
+        match list_append::parse_nemeses(&flag_value(args, "--nemesis").unwrap_or_default()) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("jepsen list-append: {e}");
+                return ExitCode::from(2);
+            }
+        };
+    let consistency = flag_value(args, "--check").unwrap_or_else(|| "serializable".into());
+    let jar = flag_value(args, "--elle-jar")
+        .or_else(|| std::env::var("ELLE_JAR").ok())
+        .map(PathBuf::from);
+    let Some(jar) = jar else {
+        eprintln!(
+            "jepsen list-append: needs elle-cli (--elle-jar PATH or ELLE_JAR) to check the history"
+        );
+        return ExitCode::from(2);
+    };
+    let history = flag_value(args, "--history")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::temp_dir().join(format!("dscore-list-append-{}.edn", std::process::id()))
+        });
+    let seed = flag_value(args, "--seed")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| std::process::id() as u64);
+    let r = match list_append::run(duration, &nemeses, &history, seed).await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("jepsen list-append: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    println!(
+        "list-append: {duration:?} seed {seed} nemeses {nemeses:?}: {} ok, {} failed, {} unknown; {} faults injected; history {}",
+        r.ok,
+        r.failed,
+        r.unknown,
+        r.faults.len(),
+        r.history.display()
+    );
+    match list_append::elle(&jar, &r.history, &consistency) {
+        Ok((true, _)) if r.ok > 0 => {
+            println!("elle: history is {consistency}");
+            ExitCode::SUCCESS
+        }
+        Ok((true, _)) => {
+            eprintln!("FAIL: no transaction committed; the history proves nothing");
+            ExitCode::FAILURE
+        }
+        Ok((false, text)) => {
+            eprintln!("FAIL: elle found the history is not {consistency} (REQ-0014 AC2):\n{text}");
+            ExitCode::FAILURE
+        }
+        Err(e) => {
+            eprintln!("jepsen list-append: {e}");
             ExitCode::FAILURE
         }
     }

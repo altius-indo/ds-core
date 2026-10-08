@@ -593,6 +593,11 @@ pub fn apply(
                         ..
                     },
                 ) => r,
+                // A retried proposal of a commit that already applied (idempotent).
+                Some(TxnRecord {
+                    status: TxnStatus::Committed { commit_ts: c },
+                    ..
+                }) if c == *commit_ts => return Ok(TxnResponse::Ok),
                 _ => return Ok(TxnResponse::Conflict(Conflict::Aborted)),
             };
             if let Some(c) = validate_spans(db, Some(*id), *start_ts, *commit_ts, reads)? {

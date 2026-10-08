@@ -20,7 +20,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::cluster::Cluster;
@@ -78,6 +78,13 @@ impl CrashPoint {
     ];
 }
 
+/// Wall-clock milliseconds shifted by a client's clock skew (fault injection).
+fn skewed_now_ms(skew: &AtomicI64) -> u64 {
+    (now_ms() as i64)
+        .saturating_add(skew.load(Ordering::Relaxed))
+        .max(0) as u64
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -111,6 +118,10 @@ pub struct TxnClient {
     tso: Arc<Tso>,
     cfg: TxnConfig,
     seq: Arc<AtomicU64>,
+    /// Offset added to this client's wall clock (harness clock-skew nemesis). The clock only
+    /// times heartbeats and decides when a record is stale enough to push, so skew can at most
+    /// abort live transactions early; it cannot break serializability (§3).
+    clock_skew_ms: Arc<AtomicI64>,
 }
 
 impl TxnClient {
@@ -120,7 +131,26 @@ impl TxnClient {
             cluster,
             cfg,
             seq: Arc::new(AtomicU64::new(0)),
+            clock_skew_ms: Arc::new(AtomicI64::new(0)),
         }
+    }
+
+    /// A client sharing this one's cluster and timestamp oracle but with its own clock, so a
+    /// harness can skew some clients and not others. (Clients must share one oracle: two
+    /// oracles in one process could hand out the same timestamp.)
+    pub fn fork_clock(&self) -> Self {
+        Self {
+            clock_skew_ms: Arc::new(AtomicI64::new(0)),
+            ..self.clone()
+        }
+    }
+
+    pub fn set_clock_skew_ms(&self, ms: i64) {
+        self.clock_skew_ms.store(ms, Ordering::Relaxed);
+    }
+
+    fn now(&self) -> u64 {
+        skewed_now_ms(&self.clock_skew_ms)
     }
 
     pub fn cluster(&self) -> &Arc<Cluster> {
@@ -180,11 +210,11 @@ impl TxnClient {
         let decided: Option<Option<Ts>> = match record.map(|r| r.status) {
             Some(TxnStatus::Committed { commit_ts }) => Some(Some(commit_ts)),
             Some(TxnStatus::Aborted) => Some(None),
-            Some(TxnStatus::Pending { heartbeat_ms }) if heartbeat_ms + ttl >= now_ms() => None,
+            Some(TxnStatus::Pending { heartbeat_ms }) if heartbeat_ms + ttl >= self.now() => None,
             _ => {
                 let push = TxnCommand::Abort {
                     id,
-                    stale_before_ms: now_ms().saturating_sub(ttl),
+                    stale_before_ms: self.now().saturating_sub(ttl),
                 };
                 match self.cluster.propose(anchor_range, push).await? {
                     TxnResponse::Record(Some(TxnRecord {
@@ -382,6 +412,7 @@ impl Txn {
         {
             let (cluster, stop, id) = (cluster.clone(), heartbeat_stop.clone(), self.meta.id);
             let every = self.client.cfg.liveness_ttl / 3;
+            let skew = self.client.clock_skew_ms.clone();
             tokio::spawn(async move {
                 loop {
                     tokio::time::sleep(every).await;
@@ -393,7 +424,7 @@ impl Txn {
                             anchor_range,
                             TxnCommand::Heartbeat {
                                 id,
-                                now_ms: now_ms(),
+                                now_ms: skewed_now_ms(&skew),
                             },
                         )
                         .await;
@@ -426,7 +457,7 @@ impl Txn {
                 txn: self.meta.clone(),
                 writes: writes_by_range[range].clone(),
                 record: *range == anchor_range,
-                now_ms: now_ms(),
+                now_ms: self.client.now(),
             };
             match cluster.propose(*range, cmd).await {
                 Ok(TxnResponse::Ok) => prewritten.push(*range),

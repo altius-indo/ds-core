@@ -23,3 +23,12 @@ cargo test --workspace
 ```
 
 The toolchain is pinned in `rust-toolchain.toml` (applied by rustup).
+
+RocksDB is compiled from source (C++), and its bindings are generated with libclang.
+On Linux, install a C++ compiler and `libclang-dev`. On macOS with the Command Line Tools,
+point the compiler at the SDK's libc++ headers:
+
+```sh
+export SDKROOT="$(xcrun --show-sdk-path)"
+export CXXFLAGS="-isystem $SDKROOT/usr/include/c++/v1"
+```

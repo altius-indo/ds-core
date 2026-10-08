@@ -2,5 +2,6 @@
 
 pub mod graph;
 pub mod net;
+pub mod raft;
 pub mod security;
 pub mod telemetry;

@@ -24,6 +24,7 @@ jobs:
       - uses: actions/checkout@v5
       - name: Install pinned toolchain
         run: rustup toolchain install && rustup target add ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
       - name: Package
         run: scripts/release/package.sh ${{ matrix.target }}
       - uses: actions/upload-artifact@v4

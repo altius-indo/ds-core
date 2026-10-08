@@ -45,6 +45,21 @@ purpose = "Crypto provider for rustls (server/src/net/tls.rs); wraps aws-lc-sys.
 licence = "ISC AND (Apache-2.0 OR ISC)"
 reviewed = "2026-10-07"
 
+# Build-time only: bindgen loads libclang through clang-sys (feature `runtime`, libloading)
+# while generating RocksDB's bindings. Nothing from it is linked into a shipped binary
+# (`cargo tree -e normal -i clang-sys` is empty); listed because its crate declares `links`.
+[[library]]
+name = "libclang (build-time, bindgen)"
+crate = "clang-sys"
+links = "clang"
+version = "=1.9.1"
+scope = "build-time"
+link_names = []
+owner = "jsanyal"
+purpose = "Generates librocksdb-sys bindings at build time; loaded with dlopen, never linked."
+licence = "Apache-2.0"
+reviewed = "2026-10-07"
+
 # Platform libraries every Rust binary may depend on. Not native dependencies we choose.
 [system]
 link_names = [

@@ -17,6 +17,7 @@ jobs:
       # rustup installs the channel pinned in rust-toolchain.toml.
       - name: Install pinned toolchain
         run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
@@ -37,6 +38,7 @@ jobs:
       - uses: actions/checkout@v5
       - name: Install pinned toolchain
         run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny
@@ -50,6 +52,7 @@ jobs:
       - uses: actions/checkout@v5
       - name: Install pinned toolchain
         run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
       - name: E1 TLS scan and plaintext refusal
         run: scripts/security/tls-scan.sh --ports client,peer --forbid sslv3,tls1.0,tls1.1,non-aead --expect-plaintext-refused
       - name: E2 peer certificate rejection
@@ -63,6 +66,7 @@ jobs:
       - uses: actions/checkout@v5
       - name: Install pinned toolchain
         run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny

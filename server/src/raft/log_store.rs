@@ -65,6 +65,17 @@ pub struct LogEngine {
 
 impl LogEngine {
     pub fn open(path: &Path) -> Result<Arc<Self>, rocksdb::Error> {
+        Self::open_with(path, true)
+    }
+
+    /// Like `open`, but appends are acknowledged without fsync. Exists only so the power-cut
+    /// harness can prove it detects lost writes; never enabled in a release build.
+    #[cfg(feature = "fault-injection")]
+    pub fn open_without_fsync(path: &Path) -> Result<Arc<Self>, rocksdb::Error> {
+        Self::open_with(path, false)
+    }
+
+    fn open_with(path: &Path, sync_wal: bool) -> Result<Arc<Self>, rocksdb::Error> {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         let db = Arc::new(DB::open(&opts, path)?);
@@ -77,7 +88,11 @@ impl LogEngine {
                 while let Ok(first) = rx.recv() {
                     let mut pending = vec![first];
                     pending.extend(rx.try_iter());
-                    let result = writer_db.flush_wal(true);
+                    let result = if sync_wal {
+                        writer_db.flush_wal(true)
+                    } else {
+                        Ok(())
+                    };
                     for p in pending {
                         match p {
                             Flush::Log(cb) => cb.log_io_completed(

@@ -13,3 +13,8 @@ path = "src/main.rs"
 
 [lints]
 workspace = true
+
+[dependencies]
+dscore-server = { version = "0.1.0", path = "../server", features = ["fault-injection"] }
+openraft = { version = "0.9", features = ["serde", "storage-v2"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "io-util", "io-std", "process", "sync"] }

@@ -462,6 +462,11 @@ dependencies = [
 [[package]]
 name = "dscore-harness"
 version = "0.1.0"
+dependencies = [
+ "dscore-server",
+ "openraft",
+ "tokio",
+]
 
 [[package]]
 name = "dscore-importer"

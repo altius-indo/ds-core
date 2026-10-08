@@ -14,7 +14,11 @@ version="$(cargo metadata --format-version 1 --no-deps --locked \
   | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="dscore-server"))')"
 bins=(dscore-server dscore-importer dscore-harness)
 
-cargo build --release --locked --target "$target" "${bins[@]/#/--bin=}"
+# One package per build: a combined build would unify features, and dscore-harness enables
+# dscore-server's test-only `fault-injection` feature.
+for b in "${bins[@]}"; do
+  cargo build --release --locked --target "$target" -p "$b" --bin "$b"
+done
 
 name="dscore-$version-$target"
 stage="target/dist/$name"

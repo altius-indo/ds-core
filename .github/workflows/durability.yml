@@ -1,0 +1,39 @@
+name: durability
+
+# STORY-0001 E2 (REQ-0016 AC1): acknowledged writes survive simultaneous power loss of every
+# node, simulated with LazyFS clear-cache. Pushes run a short regression; the nightly run
+# and manual dispatch run the full 1,000 trials the eval requires.
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      trials:
+        description: Power-cut trials
+        default: "1000"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  power-cut:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Install FUSE and LazyFS build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq g++ cmake libfuse3-dev fuse3
+          echo user_allow_other | sudo tee -a /etc/fuse.conf
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/lazyfs-0.3.1
+          key: lazyfs-0.3.1-${{ runner.os }}
+      - name: E2 power-cut durability
+        run: scripts/ci/lazyfs-powercut.sh "${{ github.event_name == 'push' && '25' || github.event.inputs.trials || '1000' }}"

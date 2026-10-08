@@ -262,3 +262,66 @@ impl Graph {
         Ok(out)
     }
 }
+
+// ---------------------------------------------------------------------- node deletion
+
+impl Graph {
+    /// Plain DELETE: refused while the node has any incident edge (REQ-0029, DEC-0006).
+    /// Returns false if the node does not exist.
+    pub async fn delete_node(&self, txn: &mut Txn, id: NodeId) -> Result<bool, DsError> {
+        let doc = keys::node_doc(self.id, id);
+        if txn.get(&doc).await?.is_none() {
+            return Ok(false);
+        }
+        let (start, end) = keys::node_span(self.id, id);
+        // Everything under the node prefix except the document itself is an edge entry. The
+        // scan is a read span, so a concurrent edge insert to this node conflicts with us.
+        let incident = txn
+            .scan(&start, &end)
+            .await?
+            .into_iter()
+            .filter(|(k, _)| *k != doc)
+            .count();
+        if incident > 0 {
+            return Err(DsError::new(
+                ErrorCode::ConstraintViolation,
+                format!("node {id} has {incident} incident edge entries; use DETACH DELETE"),
+            ));
+        }
+        txn.delete(&doc);
+        Ok(true)
+    }
+
+    /// DETACH DELETE: remove the node and every incident edge, both entries of each, in this
+    /// transaction (REQ-0030, DEC-0006). Returns the number of edges removed.
+    pub async fn detach_delete_node(
+        &self,
+        txn: &mut Txn,
+        id: NodeId,
+    ) -> Result<Option<usize>, DsError> {
+        let doc = keys::node_doc(self.id, id);
+        if txn.get(&doc).await?.is_none() {
+            return Ok(None);
+        }
+        let (start, end) = keys::node_span(self.id, id);
+        let mut removed = 0;
+        for (k, _) in txn.scan(&start, &end).await? {
+            if k == doc {
+                continue;
+            }
+            let (at, dir, etype, other, rank) =
+                keys::decode_edge(self.id, &k).ok_or_else(|| bad_data("edge key"))?;
+            let mirror = match dir {
+                Direction::Out => keys::edge(self.id, other, Direction::In, etype, at, rank),
+                Direction::In => keys::edge(self.id, other, Direction::Out, etype, at, rank),
+            };
+            txn.delete(&k);
+            txn.delete(&mirror);
+            if dir == Direction::Out || other != at {
+                removed += 1;
+            }
+        }
+        txn.delete(&doc);
+        Ok(Some(removed))
+    }
+}

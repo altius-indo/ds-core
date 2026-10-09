@@ -2,7 +2,6 @@
 //! Exercised through the graph store; GQL `DELETE` / `DETACH DELETE` statements route to the
 //! same operations once the GQL engine lands (TASK-0016).
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use dscore_server::graph::keys::{Direction, node_doc};
@@ -34,7 +33,7 @@ async fn env() -> (TxnClient, Graph, TempDir) {
         .await
         .unwrap();
     let client = TxnClient::new(
-        Arc::new(cluster),
+        cluster,
         TxnConfig {
             liveness_ttl: Duration::from_millis(300),
             lock_wait: Duration::from_secs(3),

@@ -19,6 +19,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use openraft::Config;
+use openraft::storage::{RaftSnapshotBuilder, RaftStateMachine};
 
 use super::mvcc::{Span, TxnCommand, TxnResponse, owns, owns_span};
 use crate::raft::log_store::LogEngine;
@@ -71,6 +72,10 @@ pub struct Cluster {
     /// Serializes topology changes (split, crash, restart): a node restarting mid-split must
     /// see the child range either in the descriptors or in the split's replica start-up.
     topology: tokio::sync::Mutex<()>,
+    /// Replicas waiting for their node's parent replica to apply the split that created them.
+    pending: std::sync::Mutex<std::collections::BTreeSet<(NodeId, RangeId)>>,
+    /// Ranges with ids up to this were created at start; higher ids came from splits.
+    initial_ranges: RangeId,
     dir: PathBuf,
     config: Config,
 }
@@ -105,7 +110,7 @@ impl Cluster {
         nodes: u64,
         split_points: &[&[u8]],
         config: Config,
-    ) -> Result<Self, String> {
+    ) -> Result<Arc<Self>, String> {
         let mut ranges = Vec::new();
         let mut start: Vec<u8> = Vec::new();
         for (i, p) in split_points.iter().enumerate() {
@@ -125,7 +130,7 @@ impl Cluster {
         for r in std::iter::once(META_RANGE).chain(ranges.iter().map(|r| r.id)) {
             routers.insert(r, Router::new());
         }
-        let cluster = Self {
+        let cluster = Arc::new(Self {
             nodes: RwLock::new(
                 (1..=nodes)
                     .map(|id| ClusterNode {
@@ -137,11 +142,13 @@ impl Cluster {
             ),
             next_range: AtomicU64::new(ranges.len() as u64 + 1),
             topology: tokio::sync::Mutex::new(()),
+            pending: std::sync::Mutex::new(Default::default()),
+            initial_ranges: ranges.len() as RangeId,
             ranges: RwLock::new(ranges),
             routers: RwLock::new(routers),
             dir: dir.to_path_buf(),
             config,
-        };
+        });
         for id in 1..=nodes {
             cluster.restart(id).await?;
         }
@@ -155,6 +162,14 @@ impl Cluster {
         for r in cluster.all_ranges() {
             cluster.leader(r).await.map_err(|e| e.to_string())?;
         }
+        let weak = Arc::downgrade(&cluster);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                let Some(c) = weak.upgrade() else { break };
+                c.start_pending().await;
+            }
+        });
         Ok(cluster)
     }
 
@@ -354,7 +369,7 @@ impl Cluster {
     /// has the same replicas and serves once it has elected a leader. Requests routed with the
     /// old descriptor get `RangeMismatch` meanwhile and retry.
     pub async fn split(&self, range: RangeId, at: &[u8]) -> Result<RangeId, String> {
-        let _topology = self.topology.lock().await;
+        let topology = self.topology.lock().await;
         let parent = self
             .ranges()
             .into_iter()
@@ -384,26 +399,13 @@ impl Cluster {
                 Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
             }
         }
-        // Bring up the child group on every live node, each initialized with the same
-        // membership so any of them can lead. A node that is down now gets its replica when it
-        // restarts (the descriptor below), and catches up from the child's leader.
+        // Publish the child, then bring up its replica on every live node whose parent replica
+        // has applied the split; those bootstrap the group. The rest start from the reconciler
+        // once their parent replica has applied the split too.
         self.routers
             .write()
             .expect("cluster lock")
             .insert(child, Router::new());
-        let members: BTreeMap<NodeId, NodeInfo> = self
-            .node_ids()
-            .into_iter()
-            .map(|id| (id, info(id)))
-            .collect();
-        for (id, (kv, _)) in self.snapshot() {
-            if let Ok(raft) = self
-                .start_replica(id, child, at.to_vec(), parent.end.clone(), &kv)
-                .await
-            {
-                let _ = raft.initialize(members.clone()).await;
-            }
-        }
         {
             let mut ranges = self.ranges.write().expect("cluster lock");
             if let Some(p) = ranges.iter_mut().find(|r| r.id == range) {
@@ -416,11 +418,180 @@ impl Cluster {
             });
             ranges.sort_by(|a, b| a.start.cmp(&b.start));
         }
+        for id in self.node_ids() {
+            self.start_or_defer(id, child, true).await?;
+        }
+        // The child may need a deferred replica for a quorum, and the reconciler that starts
+        // it takes the topology lock: release it before waiting for the election.
+        drop(topology);
         self.leader(child).await.map_err(|e| e.to_string())?;
         Ok(child)
     }
 
+    /// Start `node`'s replica of `range` if it is ready, else queue it for the reconciler.
+    async fn start_or_defer(
+        &self,
+        node: NodeId,
+        range: RangeId,
+        bootstrap: bool,
+    ) -> Result<(), String> {
+        if !self.try_start(node, range, bootstrap).await? {
+            self.pending
+                .lock()
+                .expect("cluster lock")
+                .insert((node, range));
+        }
+        Ok(())
+    }
+
+    /// Start `node`'s replica of `range` unless another replica on that node still owns part
+    /// of its interval (a parent that has not applied the split yet). Ok(true) when the
+    /// replica is running, or the node is down (its restart will start it).
+    async fn try_start(
+        &self,
+        node: NodeId,
+        range: RangeId,
+        bootstrap: bool,
+    ) -> Result<bool, String> {
+        let Some((kv, rafts)) = self
+            .nodes
+            .read()
+            .expect("cluster lock")
+            .iter()
+            .find(|n| n.id == node)
+            .and_then(|n| n.up.clone())
+        else {
+            return Ok(true);
+        };
+        if rafts.contains_key(&range) {
+            return Ok(true);
+        }
+        let (start, end) = match self.ranges().into_iter().find(|d| d.id == range) {
+            Some(d) => (d.start, d.end),
+            None => {
+                // The meta range owns no user keys.
+                return self
+                    .start_replica(
+                        node,
+                        range,
+                        META_INTERVAL.to_vec(),
+                        META_INTERVAL.to_vec(),
+                        &kv,
+                    )
+                    .await
+                    .map(|_| true);
+            }
+        };
+        let others = self
+            .ranges()
+            .into_iter()
+            .map(|d| d.id)
+            .filter(|r| *r != range);
+        if kv
+            .overlapped(others, &start, &end)
+            .map_err(|e| e.to_string())?
+        {
+            return Ok(false);
+        }
+        if !self.is_split_child(range) {
+            self.start_replica(node, range, start, end, &kv).await?;
+            return Ok(true);
+        }
+        if kv
+            .range_interval(range)
+            .map_err(|e| e.to_string())?
+            .is_some()
+        {
+            // This node's parent replica applied the split: the child's state here is exactly
+            // the parent's at the split, which is where the child's log begins. Replicas
+            // started with the split bootstrap the group; one that starts later joins when the
+            // leader contacts it and replays the child's log from the start.
+            let raft = self.start_replica(node, range, start, end, &kv).await?;
+            if bootstrap {
+                let _ = raft.initialize(self.members()).await;
+            }
+            return Ok(true);
+        }
+        // This node's parent replica skipped the split (it installed a later parent snapshot),
+        // so the child's keys here hold stale parent data, and replaying the child's log onto
+        // them would be wrong. Start the replica empty and off the network, install a snapshot
+        // of the child's leader, and only then connect it.
+        let Some((leader_kv, vote)) = self.leader_store(range) else {
+            return Ok(false);
+        };
+        let snapshot = leader_kv
+            .range(range, start.clone(), end.clone())
+            .get_snapshot_builder()
+            .await
+            .build_snapshot()
+            .await
+            .map_err(|e| e.to_string())?;
+        kv.wipe_range(range, &start, &end)
+            .map_err(|e| e.to_string())?;
+        let raft = self.start_unrouted(node, range, start, end, &kv).await?;
+        raft.install_full_snapshot(vote, snapshot)
+            .await
+            .map_err(|e| e.to_string())?;
+        self.route(node, range, &raft)?;
+        Ok(true)
+    }
+
+    /// The store and vote of `range`'s current leader.
+    fn leader_store(&self, range: RangeId) -> Option<(Arc<KvEngine>, openraft::Vote<NodeId>)> {
+        self.snapshot().into_iter().find_map(|(id, (kv, rafts))| {
+            let m = rafts.get(&range)?.metrics().borrow().clone();
+            (m.state == openraft::ServerState::Leader && m.current_leader == Some(id))
+                .then_some((kv, m.vote))
+        })
+    }
+
+    fn members(&self) -> BTreeMap<NodeId, NodeInfo> {
+        self.node_ids()
+            .into_iter()
+            .map(|id| (id, info(id)))
+            .collect()
+    }
+
+    /// Whether `range` was created by a split rather than at cluster start.
+    fn is_split_child(&self, range: RangeId) -> bool {
+        range > self.initial_ranges
+    }
+
+    /// Start every queued replica that has become ready.
+    async fn start_pending(&self) {
+        let _topology = self.topology.lock().await;
+        let queued: Vec<(NodeId, RangeId)> = self
+            .pending
+            .lock()
+            .expect("cluster lock")
+            .iter()
+            .copied()
+            .collect();
+        for (node, range) in queued {
+            if let Ok(true) = self.try_start(node, range, false).await {
+                self.pending
+                    .lock()
+                    .expect("cluster lock")
+                    .remove(&(node, range));
+            }
+        }
+    }
+
     async fn start_replica(
+        &self,
+        node: NodeId,
+        range: RangeId,
+        start: Vec<u8>,
+        end: Vec<u8>,
+        kv: &Arc<KvEngine>,
+    ) -> Result<Raft, String> {
+        let raft = self.start_unrouted(node, range, start, end, kv).await?;
+        self.route(node, range, &raft)?;
+        Ok(raft)
+    }
+
+    /// Start `node`'s replica of `range` without connecting it to the range's network yet.
+    async fn start_unrouted(
         &self,
         node: NodeId,
         range: RangeId,
@@ -439,14 +610,17 @@ impl Cluster {
         let router = self
             .router(range)
             .ok_or_else(|| format!("no router for range {range}"))?;
-        let net = RouterNetwork {
-            router: router.clone(),
-            from: node,
-        };
-        let raft = start_range(node, range, start, end, self.config.clone(), &logs, kv, net)
+        let net = RouterNetwork { router, from: node };
+        start_range(node, range, start, end, self.config.clone(), &logs, kv, net)
             .await
-            .map_err(|e| e.to_string())?;
-        router.add(node, raft.clone());
+            .map_err(|e| e.to_string())
+    }
+
+    /// Connect a started replica to its range's network and record it on its node.
+    fn route(&self, node: NodeId, range: RangeId, raft: &Raft) -> Result<(), String> {
+        self.router(range)
+            .ok_or_else(|| format!("no router for range {range}"))?
+            .add(node, raft.clone());
         let mut nodes = self.nodes.write().expect("cluster lock");
         if let Some((_, rafts)) = nodes
             .iter_mut()
@@ -455,7 +629,7 @@ impl Cluster {
         {
             rafts.insert(range, raft.clone());
         }
-        Ok(raft)
+        Ok(())
     }
 
     // ------------------------------------------------------------------ fault hooks
@@ -463,6 +637,11 @@ impl Cluster {
     /// Stop every replica on `node` and drop its stores, as a process crash would.
     pub async fn crash(&self, node: NodeId) {
         let _topology = self.topology.lock().await;
+        // Restart re-queues whatever this node still has to start.
+        self.pending
+            .lock()
+            .expect("cluster lock")
+            .retain(|(n, _)| *n != node);
         for router in self.routers.read().expect("cluster lock").values() {
             router.remove(node);
         }
@@ -508,11 +687,7 @@ impl Cluster {
             }
         }
         for r in self.all_ranges() {
-            let (s, e) = match self.ranges().into_iter().find(|d| d.id == r) {
-                Some(d) => (d.start, d.end),
-                None => (META_INTERVAL.to_vec(), META_INTERVAL.to_vec()),
-            };
-            self.start_replica(node, r, s, e, &kv).await?;
+            self.start_or_defer(node, r, false).await?;
         }
         Ok(())
     }

@@ -1,7 +1,6 @@
 //! GQL statements executed end to end through a session on a 3-range cluster.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::time::Duration;
 
 use dscore_server::gql::session::Session;
@@ -29,7 +28,7 @@ async fn session() -> (Session, TxnClient, TempDir) {
         .await
         .unwrap();
     let client = TxnClient::new(
-        Arc::new(cluster),
+        cluster,
         TxnConfig {
             liveness_ttl: Duration::from_millis(300),
             lock_wait: Duration::from_secs(3),

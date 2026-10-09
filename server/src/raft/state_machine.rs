@@ -97,6 +97,52 @@ impl KvEngine {
         Ok(out)
     }
 
+    /// Whether any of `others` has an applied interval on this store overlapping `[start, end)`.
+    /// A replica may only start on a store when no other local replica still owns part of its
+    /// interval: a lagging parent that has not applied the split would otherwise write into the
+    /// child's keys underneath it.
+    pub fn overlapped(
+        &self,
+        others: impl IntoIterator<Item = RangeId>,
+        start: &[u8],
+        end: &[u8],
+    ) -> Result<bool, rocksdb::Error> {
+        for r in others {
+            if let Some((s, e)) = self.range_interval(r)?
+                && (e.is_empty() || s < e)
+                && (end.is_empty() || s.as_slice() < end)
+                && (e.is_empty() || start < e.as_slice())
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Delete `range`'s data in `[start, end)` and its applied state, leaving an empty replica
+    /// that can only be brought up to date by a snapshot.
+    pub fn wipe_range(
+        &self,
+        range: RangeId,
+        start: &[u8],
+        end: &[u8],
+    ) -> Result<(), rocksdb::Error> {
+        let mut batch = WriteBatch::default();
+        let data_hi = if end.is_empty() {
+            vec![DATA + 1]
+        } else {
+            data_key(end)
+        };
+        batch.delete_range(data_key(start), data_hi);
+        for (lo, hi) in mvcc::owned_spans(range, start, end) {
+            batch.delete_range(lo, hi);
+        }
+        for kind in [APPLIED, MEMBERSHIP, INTERVAL] {
+            batch.delete(meta_key(range, kind));
+        }
+        self.db.write(batch)
+    }
+
     /// The state machine for `range`. A range created by a split, or restarted, uses its
     /// persisted interval; otherwise `[start, end)` is recorded as its initial interval.
     pub fn range(
@@ -123,6 +169,24 @@ impl KvEngine {
             snapshot: Arc::new(Mutex::new(None)),
         }
     }
+}
+
+/// The kvdb key spans `range` owns given its interval: its user data, its MVCC keys, and its
+/// interval record (which travels with snapshots, so a replica rebuilt after a split learns
+/// its bounds).
+fn owned_spans(range: RangeId, (start, end): &Interval) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let data_lo = data_key(start);
+    let data_hi = if end.is_empty() {
+        vec![DATA + 1]
+    } else {
+        data_key(end)
+    };
+    let mut spans = vec![(data_lo, data_hi)];
+    spans.extend(mvcc::owned_spans(range, start, end));
+    let mut hi = meta_key(range, INTERVAL);
+    hi.push(0);
+    spans.push((meta_key(range, INTERVAL), hi));
+    spans
 }
 
 /// A raw kvdb key and its value.
@@ -181,21 +245,7 @@ impl RangeStateMachine {
     /// Raw kvdb intervals this range owns: plain data plus MVCC versions, intents, records and
     /// the TSO mark. Snapshots carry exactly these.
     fn owned(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
-        let (start, end) = self.interval.read().expect("interval lock").clone();
-        let data_lo = data_key(&start);
-        let data_hi = if end.is_empty() {
-            vec![DATA + 1]
-        } else {
-            data_key(&end)
-        };
-        let mut spans = vec![(data_lo, data_hi)];
-        spans.extend(mvcc::owned_spans(self.range, &start, &end));
-        // The interval itself travels with snapshots, so a replica rebuilt after a split
-        // learns its bounds.
-        let mut hi = meta_key(self.range, INTERVAL);
-        hi.push(0);
-        spans.push((meta_key(self.range, INTERVAL), hi));
-        spans
+        owned_spans(self.range, &self.interval.read().expect("interval lock"))
     }
 
     /// Split at `at` (see Command::Split); false if `at` is not strictly inside the interval.
@@ -236,38 +286,47 @@ impl RangeStateMachine {
         }
     }
 
-    fn pairs(&self) -> Result<Vec<KvPair>, AnyError> {
-        let mut out = Vec::new();
-        for (lo, hi) in self.owned() {
-            for item in self
-                .engine
-                .db
-                .iterator(IteratorMode::From(&lo, Direction::Forward))
-            {
+    /// The applied log id, membership and owned pairs, all read at one point in time. Applies
+    /// run while a snapshot is built, and a snapshot whose data is newer than its log id would
+    /// have the entries in between applied a second time by whoever installs it.
+    fn consistent_state(&self) -> Result<(Option<LogId>, StoredMembership, Vec<KvPair>), AnyError> {
+        let snap = self.engine.db.snapshot();
+        let meta = |kind| {
+            snap.get(meta_key(self.range, kind))
+                .map_err(|e| AnyError::new(&e))
+        };
+        let applied: Option<LogId> = match meta(APPLIED)? {
+            Some(b) => decode::<Option<LogId>>(&b)?,
+            None => None,
+        };
+        let membership: StoredMembership = match meta(MEMBERSHIP)? {
+            Some(b) => decode(&b)?,
+            None => StoredMembership::default(),
+        };
+        let interval: Interval = match meta(INTERVAL)? {
+            Some(b) => decode(&b)?,
+            None => self.interval.read().expect("interval lock").clone(),
+        };
+        let mut pairs = Vec::new();
+        for (lo, hi) in owned_spans(self.range, &interval) {
+            for item in snap.iterator(IteratorMode::From(&lo, Direction::Forward)) {
                 let (k, v) = item.map_err(|e| AnyError::new(&e))?;
                 if k.as_ref() >= hi.as_slice() {
                     break;
                 }
-                out.push((k.to_vec(), v.to_vec()));
+                pairs.push((k.to_vec(), v.to_vec()));
             }
         }
-        Ok(out)
+        Ok((applied, membership, pairs))
     }
 }
 
 impl RaftSnapshotBuilder<TypeConfig> for RangeStateMachine {
     async fn build_snapshot(&mut self) -> Result<Snapshot<TypeConfig>, StorageError> {
-        let applied: Option<LogId> = self
-            .get_meta(APPLIED)
+        let (applied, membership, pairs) = self
+            .consistent_state()
             .map_err(StorageIOError::read_state_machine)?;
-        let membership: StoredMembership = self
-            .get_meta(MEMBERSHIP)
-            .map_err(StorageIOError::read_state_machine)?
-            .unwrap_or_default();
-        let data = encode(&SnapshotData {
-            pairs: self.pairs().map_err(StorageIOError::read_state_machine)?,
-        })
-        .map_err(StorageIOError::read_state_machine)?;
+        let data = encode(&SnapshotData { pairs }).map_err(StorageIOError::read_state_machine)?;
         let snapshot_id = match applied {
             Some(l) => format!("{}-{}-{}", self.range, l.leader_id, l.index),
             None => format!("{}-empty", self.range),
@@ -293,8 +352,9 @@ impl RaftStateMachine<TypeConfig> for RangeStateMachine {
 
     async fn applied_state(&mut self) -> Result<(Option<LogId>, StoredMembership), StorageError> {
         let applied = self
-            .get_meta(APPLIED)
-            .map_err(StorageIOError::read_state_machine)?;
+            .get_meta::<Option<LogId>>(APPLIED)
+            .map_err(StorageIOError::read_state_machine)?
+            .flatten();
         let membership = self
             .get_meta(MEMBERSHIP)
             .map_err(StorageIOError::read_state_machine)?
@@ -448,6 +508,9 @@ mod tests {
             matches!(r[..], [CommandResult::Ok, CommandResult::Ok]),
             "{r:?}"
         );
+        // The applied log id reads back exactly (it is stored as an Option<LogId>).
+        let (applied, _) = sm.applied_state().await.unwrap();
+        assert_eq!(applied, Some(entry(2, split()).log_id));
         assert_eq!(
             kv.range_interval(1).unwrap(),
             Some((b"a".to_vec(), b"m".to_vec()))

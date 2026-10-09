@@ -18,11 +18,9 @@ async fn env() -> (TxnClient, Arc<Cluster>, TempDir) {
         election_timeout_max: 600,
         ..Default::default()
     };
-    let cluster = Arc::new(
-        Cluster::start(dir.path(), 3, &[b"g", b"p"], config)
-            .await
-            .unwrap(),
-    );
+    let cluster = Cluster::start(dir.path(), 3, &[b"g", b"p"], config)
+        .await
+        .unwrap();
     let client = TxnClient::new(
         cluster.clone(),
         TxnConfig {

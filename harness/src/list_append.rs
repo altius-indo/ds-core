@@ -255,7 +255,7 @@ pub async fn run(o: &Options) -> Result<Report, String> {
         election_timeout_max: 600,
         ..Default::default()
     };
-    let cluster = Arc::new(Cluster::start(&dir, 3, &[b"g", b"p"], config).await?);
+    let cluster = Cluster::start(&dir, 3, &[b"g", b"p"], config).await?;
     let base = TxnClient::new(
         cluster.clone(),
         TxnConfig {

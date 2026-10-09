@@ -190,7 +190,6 @@ fn schemaless_unseen_labels_and_edge_type_need_no_ddl() {
 // fall inside the node-id space, so an edge's endpoints live on different ranges.
 
 mod stored {
-    use std::sync::Arc;
     use std::time::Duration;
 
     use dscore_server::graph::keys::{Direction, node_doc};
@@ -220,7 +219,7 @@ mod stored {
             .await
             .unwrap();
         let client = TxnClient::new(
-            Arc::new(cluster),
+            cluster,
             TxnConfig {
                 liveness_ttl: Duration::from_millis(300),
                 lock_wait: Duration::from_secs(3),

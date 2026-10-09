@@ -1,7 +1,6 @@
 //! STORY-0005 (E1, E3) and STORY-0006 (E1-E3): serializable cross-shard transactions.
 //! The cluster has 3 nodes and 3 data ranges: [-∞, g), [g, p), [p, +∞).
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use dscore_server::txn::cluster::Cluster;
@@ -27,7 +26,7 @@ async fn env() -> Env {
         .await
         .unwrap();
     let client = TxnClient::new(
-        Arc::new(cluster),
+        cluster,
         TxnConfig {
             liveness_ttl: Duration::from_millis(300),
             lock_wait: Duration::from_secs(3),

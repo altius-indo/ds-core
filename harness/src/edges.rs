@@ -111,7 +111,7 @@ pub async fn run(
     };
     let s1 = keys::node_doc(1, 1 << 62);
     let s2 = keys::node_doc(1, 2 << 62);
-    let cluster = Arc::new(Cluster::start(&dir, 3, &[&s1, &s2], config).await?);
+    let cluster = Cluster::start(&dir, 3, &[&s1, &s2], config).await?;
     let client = TxnClient::new(
         cluster.clone(),
         TxnConfig {

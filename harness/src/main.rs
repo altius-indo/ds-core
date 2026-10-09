@@ -23,9 +23,14 @@
 //!       [--split-budget 60] [--nemesis split,crash,partition] [--elle-jar PATH | ELLE_JAR]
 //!   (list-append under continuous range splits, paced to last the run: REQ-0033 AC2)
 //!
-//! See powercut.rs, leaderkill.rs and membership_churn.rs for the methods. `node-group` is
+//!   dscore-harness scenario add-node --workload ycsb-a --assert-balance 0.10 --within 1h \
+//!       --assert-zero-errors [--records 4000] [--max-range-bytes 16384] [--rate 200]
+//!       [--settle 10s] [--move-interval 1s] [--seed N]
+//!
+//! See powercut.rs, leaderkill.rs, membership_churn.rs and add_node.rs for the methods. `node-group` is
 //! the child process the power-cut fault drives.
 
+mod add_node;
 mod edges;
 mod leaderkill;
 mod list_append;
@@ -120,6 +125,7 @@ async fn jepsen(args: &[String]) -> ExitCode {
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 fn usage() -> ExitCode {
     eprintln!(
@@ -440,6 +446,88 @@ async fn leader_kill(args: &[String]) -> ExitCode {
     }
 }
 
+async fn scenario_add_node(args: &[String]) -> ExitCode {
+    if flag_value(args, "--workload").as_deref() != Some("ycsb-a") {
+        eprintln!("scenario add-node: only --workload ycsb-a is supported");
+        return ExitCode::from(2);
+    }
+    let num = |name: &str, default: f64| {
+        flag_value(args, name)
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(default)
+    };
+    let dur = |name: &str, default: Duration| {
+        flag_value(args, name)
+            .as_deref()
+            .and_then(parse_duration)
+            .unwrap_or(default)
+    };
+    let opts = add_node::Options {
+        records: num("--records", 4000.0) as u64,
+        max_range_bytes: num("--max-range-bytes", 16384.0) as u64,
+        balance: num("--assert-balance", 0.10),
+        within: dur("--within", Duration::from_secs(3600)),
+        rate: num("--rate", 200.0),
+        settle: dur("--settle", Duration::from_secs(10)),
+        move_interval: dur("--move-interval", Duration::from_secs(1)),
+        seed: num("--seed", std::process::id() as f64) as u64,
+    };
+    let dir = std::env::temp_dir().join(format!("dscore-add-node-{}", std::process::id()));
+    let r = add_node::run(&dir, &opts).await;
+    let _ = std::fs::remove_dir_all(&dir);
+    let r = match r {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("scenario add-node: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    println!(
+        "add-node: {} ranges, {} moves, balanced {} (replicas {:?}, max deviation {:.1}%); \
+         {} YCSB-A requests, {} retried, {} failed; {} records lost",
+        r.ranges,
+        r.moves,
+        r.balanced_after
+            .map_or("never".to_string(), |d| format!("after {d:?}")),
+        r.counts,
+        r.deviation * 100.0,
+        r.ops,
+        r.retried,
+        r.failed,
+        r.lost
+    );
+    let mut ok = true;
+    if r.balanced_after.is_none() || r.deviation > opts.balance {
+        eprintln!(
+            "FAIL: replica counts not within {:.0}% of the mean within {:?} (REQ-0033 AC1)",
+            opts.balance * 100.0,
+            opts.within
+        );
+        ok = false;
+    }
+    if has(args, "--assert-zero-errors") && r.failed > 0 {
+        eprintln!(
+            "FAIL: {} client requests failed (REQ-0033 AC1); first: {}",
+            r.failed,
+            r.first_failure.unwrap_or_default()
+        );
+        ok = false;
+    }
+    if r.lost > 0 {
+        eprintln!("FAIL: {} preloaded records missing after the moves", r.lost);
+        ok = false;
+    }
+    if r.moves == 0 {
+        eprintln!("FAIL: no replica moved; the scenario exercised nothing");
+        ok = false;
+    }
+    if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -456,6 +544,7 @@ async fn main() -> ExitCode {
         ["fault", "power-cut", ..] => power_cut(&args[2..]).await,
         ["fault", "leader-kill", ..] => leader_kill(&args[2..]).await,
         ["jepsen", ..] => jepsen(&args[1..]).await,
+        ["scenario", "add-node", ..] => scenario_add_node(&args[2..]).await,
         ["node-group", ..] => {
             let Some(dir) = flag_value(&args, "--dir") else {
                 return usage();

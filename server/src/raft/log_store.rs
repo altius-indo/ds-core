@@ -112,6 +112,17 @@ impl LogEngine {
         Ok(Arc::new(Self { db, flushes: tx }))
     }
 
+    /// Delete everything `range` stored here (entries, vote, committed and purged marks),
+    /// synced: a removed replica's log must not survive to confuse a later, fresh replica.
+    pub fn wipe_range(&self, range: RangeId) -> Result<(), rocksdb::Error> {
+        let mut b = WriteBatch::default();
+        b.delete_range(
+            range.to_be_bytes().to_vec(),
+            (range + 1).to_be_bytes().to_vec(),
+        );
+        self.write(b, true)
+    }
+
     /// The log store for one range's Raft group on this store.
     pub fn range(self: &Arc<Self>, range: RangeId) -> RangeLogStore {
         RangeLogStore {

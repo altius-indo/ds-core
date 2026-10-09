@@ -12,7 +12,7 @@
 
 // reqforge: implements REQ-0033
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -21,9 +21,10 @@ use std::time::Duration;
 use openraft::Config;
 use openraft::storage::{RaftSnapshotBuilder, RaftStateMachine};
 
-use super::mvcc::{Span, TxnCommand, TxnResponse, owns, owns_span};
+use super::mvcc::{RangeStats, Span, TxnCommand, TxnResponse, live_stats, owns, owns_span};
 use crate::raft::log_store::LogEngine;
 use crate::raft::network::{Router, RouterNetwork};
+use crate::raft::placement::next_move;
 use crate::raft::start_range;
 use crate::raft::state_machine::{Interval, KvEngine};
 use crate::raft::types::{Command, CommandResult, NodeId, NodeInfo, Raft, RangeId};
@@ -40,6 +41,8 @@ pub struct RangeDesc {
     pub start: Vec<u8>,
     /// Exclusive; empty means +∞.
     pub end: Vec<u8>,
+    /// Nodes holding a voting replica.
+    pub replicas: BTreeSet<NodeId>,
 }
 
 impl RangeDesc {
@@ -76,6 +79,8 @@ pub struct Cluster {
     pending: std::sync::Mutex<std::collections::BTreeSet<(NodeId, RangeId)>>,
     /// Ranges with ids up to this were created at start; higher ids came from splits.
     initial_ranges: RangeId,
+    /// Nodes holding a replica of the meta range.
+    meta_replicas: BTreeSet<NodeId>,
     dir: PathBuf,
     config: Config,
 }
@@ -118,6 +123,7 @@ impl Cluster {
                 id: i as RangeId + 1,
                 start: start.clone(),
                 end: p.to_vec(),
+                replicas: (1..=nodes).collect(),
             });
             start = p.to_vec();
         }
@@ -125,6 +131,7 @@ impl Cluster {
             id: split_points.len() as RangeId + 1,
             start,
             end: Vec::new(),
+            replicas: (1..=nodes).collect(),
         });
         let mut routers = HashMap::new();
         for r in std::iter::once(META_RANGE).chain(ranges.iter().map(|r| r.id)) {
@@ -144,6 +151,7 @@ impl Cluster {
             topology: tokio::sync::Mutex::new(()),
             pending: std::sync::Mutex::new(Default::default()),
             initial_ranges: ranges.len() as RangeId,
+            meta_replicas: (1..=nodes).collect(),
             ranges: RwLock::new(ranges),
             routers: RwLock::new(routers),
             dir: dir.to_path_buf(),
@@ -415,10 +423,11 @@ impl Cluster {
                 id: child,
                 start: at.to_vec(),
                 end: parent.end,
+                replicas: parent.replicas.clone(),
             });
             ranges.sort_by(|a, b| a.start.cmp(&b.start));
         }
-        for id in self.node_ids() {
+        for id in parent.replicas {
             self.start_or_defer(id, child, true).await?;
         }
         // The child may need a deferred replica for a quorum, and the reconciler that starts
@@ -426,6 +435,212 @@ impl Cluster {
         drop(topology);
         self.leader(child).await.map_err(|e| e.to_string())?;
         Ok(child)
+    }
+
+    /// Live keys, bytes and median key of `range`, read on its leader.
+    pub async fn range_stats(&self, range: RangeId) -> Result<RangeStats, Unavailable> {
+        let desc = self
+            .ranges()
+            .into_iter()
+            .find(|d| d.id == range)
+            .ok_or_else(|| Unavailable(format!("no range {range}")))?;
+        self.read(range, |db| live_stats(db, &desc.start, &desc.end))
+            .await?
+            .map_err(Unavailable)
+    }
+
+    /// Split every range holding more than `max_bytes` of live data at its median key
+    /// (REQ-0033: automatic split of ranges exceeding a configurable size). Returns the
+    /// splits made.
+    pub async fn split_oversized(&self, max_bytes: u64) -> Vec<(RangeId, RangeId)> {
+        let mut done = Vec::new();
+        for d in self.ranges() {
+            let Ok(stats) = self.range_stats(d.id).await else {
+                continue;
+            };
+            if stats.bytes <= max_bytes {
+                continue;
+            }
+            if let Some(at) = stats.median
+                && at.as_slice() > d.start.as_slice()
+                && let Ok(child) = self.split(d.id, &at).await
+            {
+                done.push((d.id, child));
+            }
+        }
+        done
+    }
+
+    /// Make one replica move towards balance, if any is needed (REQ-0033 AC1). Returns the
+    /// move made.
+    pub async fn rebalance_step(&self) -> Result<Option<(RangeId, NodeId, NodeId)>, String> {
+        let ranges: Vec<(RangeId, BTreeSet<NodeId>)> = self
+            .ranges()
+            .into_iter()
+            .map(|d| (d.id, d.replicas))
+            .collect();
+        let Some(m @ (range, from, to)) = next_move(&ranges, &self.node_ids()) else {
+            return Ok(None);
+        };
+        self.move_replica(range, from, to).await?;
+        Ok(Some(m))
+    }
+
+    /// Replicas per node, over the data ranges.
+    pub fn replica_counts(&self) -> BTreeMap<NodeId, usize> {
+        let mut count: BTreeMap<NodeId, usize> =
+            self.node_ids().into_iter().map(|n| (n, 0)).collect();
+        for d in self.ranges() {
+            for n in d.replicas {
+                *count.entry(n).or_default() += 1;
+            }
+        }
+        count
+    }
+
+    /// Add an empty node, in a zone of its own; it holds no replicas until the rebalancer moves
+    /// some to it.
+    pub async fn add_node(&self) -> Result<NodeId, String> {
+        let _topology = self.topology.lock().await;
+        let id = self.node_ids().into_iter().max().unwrap_or(0) + 1;
+        self.nodes.write().expect("cluster lock").push(ClusterNode {
+            id,
+            up: None,
+            logs: None,
+        });
+        self.restart_locked(id).await?;
+        Ok(id)
+    }
+
+    /// Move `range`'s replica from node `from` to node `to` (REQ-0033 rebalancing). The new
+    /// replica starts from a snapshot of the leader, off the network until installed (the
+    /// range's log may not reach back to data it never had), joins as a learner, and replaces
+    /// `from` through joint consensus. `from`'s replica is then stopped and its data and log
+    /// deleted, so a later replica there starts clean.
+    pub async fn move_replica(
+        &self,
+        range: RangeId,
+        from: NodeId,
+        to: NodeId,
+    ) -> Result<(), String> {
+        let _topology = self.topology.lock().await;
+        let desc = self
+            .ranges()
+            .into_iter()
+            .find(|d| d.id == range)
+            .ok_or_else(|| format!("no range {range}"))?;
+        if !desc.replicas.contains(&from) || desc.replicas.contains(&to) {
+            return Err(format!(
+                "range {range}: cannot move {from} -> {to}, replicas {:?}",
+                desc.replicas
+            ));
+        }
+        let (kv_to, logs_to) = self
+            .handles(to)
+            .ok_or_else(|| format!("node {to} is down"))?;
+        let (leader, leader_kv) = self.leader(range).await.map_err(|e| e.to_string())?;
+        let vote = leader.metrics().borrow().vote;
+        let snapshot = leader_kv
+            .range(range, desc.start.clone(), desc.end.clone())
+            .get_snapshot_builder()
+            .await
+            .build_snapshot()
+            .await
+            .map_err(|e| e.to_string())?;
+        kv_to
+            .wipe_range(range, &desc.start, &desc.end)
+            .map_err(|e| e.to_string())?;
+        logs_to.wipe_range(range).map_err(|e| e.to_string())?;
+        let raft = self
+            .start_unrouted(to, range, desc.start.clone(), desc.end.clone(), &kv_to)
+            .await?;
+        raft.install_full_snapshot(vote, snapshot)
+            .await
+            .map_err(|e| e.to_string())?;
+        self.route(to, range, &raft)?;
+
+        let mut voters = desc.replicas.clone();
+        voters.remove(&from);
+        voters.insert(to);
+        let changed = self.change_voters(range, to, &voters).await;
+        if let Err(e) = changed {
+            // Back out: the old voters still serve; drop the half-joined replica.
+            self.drop_replica(to, range, &desc).await;
+            return Err(e);
+        }
+        {
+            let mut ranges = self.ranges.write().expect("cluster lock");
+            if let Some(d) = ranges.iter_mut().find(|d| d.id == range) {
+                d.replicas = voters;
+            }
+        }
+        self.drop_replica(from, range, &desc).await;
+        Ok(())
+    }
+
+    /// Add `learner` to `range` and make `voters` the voting set, retrying across leader
+    /// changes until a leader confirms it.
+    async fn change_voters(
+        &self,
+        range: RangeId,
+        learner: NodeId,
+        voters: &BTreeSet<NodeId>,
+    ) -> Result<(), String> {
+        let deadline = tokio::time::Instant::now() + SPLIT_WAIT;
+        loop {
+            let (leader, _) = self.leader(range).await.map_err(|e| e.to_string())?;
+            let attempt = async {
+                leader
+                    .add_learner(learner, info(learner), true)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                leader
+                    .change_membership(
+                        openraft::ChangeMembers::ReplaceAllVoters(voters.clone()),
+                        false,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())
+            };
+            let error = match tokio::time::timeout(SPLIT_WAIT, attempt).await {
+                Ok(Ok(_)) => return Ok(()),
+                Ok(Err(e)) => e,
+                Err(_) => "timed out".to_string(),
+            };
+            if tokio::time::Instant::now() >= deadline {
+                return Err(format!("range {range}: voter change failed: {error}"));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// Stop `node`'s replica of `range` and delete its data and log there.
+    async fn drop_replica(&self, node: NodeId, range: RangeId, desc: &RangeDesc) {
+        if let Some(router) = self.router(range) {
+            router.remove(node);
+        }
+        let raft = {
+            let mut nodes = self.nodes.write().expect("cluster lock");
+            nodes
+                .iter_mut()
+                .find(|n| n.id == node)
+                .and_then(|n| n.up.as_mut())
+                .and_then(|(_, rafts)| rafts.remove(&range))
+        };
+        if let Some(r) = raft {
+            let _ = r.shutdown().await;
+        }
+        if let Some((kv, logs)) = self.handles(node) {
+            let _ = kv.wipe_range(range, &desc.start, &desc.end);
+            let _ = logs.wipe_range(range);
+        }
+    }
+
+    /// A live node's stores.
+    fn handles(&self, node: NodeId) -> Option<(Arc<KvEngine>, Arc<LogEngine>)> {
+        let nodes = self.nodes.read().expect("cluster lock");
+        let n = nodes.iter().find(|n| n.id == node)?;
+        Some((n.up.as_ref()?.0.clone(), n.logs.clone()?))
     }
 
     /// Start `node`'s replica of `range` if it is ready, else queue it for the reconciler.
@@ -463,7 +678,7 @@ impl Cluster {
         else {
             return Ok(true);
         };
-        if rafts.contains_key(&range) {
+        if rafts.contains_key(&range) || !self.replicas_of(range).contains(&node) {
             return Ok(true);
         }
         let (start, end) = match self.ranges().into_iter().find(|d| d.id == range) {
@@ -485,8 +700,8 @@ impl Cluster {
         let others = self
             .ranges()
             .into_iter()
-            .map(|d| d.id)
-            .filter(|r| *r != range);
+            .filter(|d| d.id != range && d.replicas.contains(&node))
+            .map(|d| d.id);
         if kv
             .overlapped(others, &start, &end)
             .map_err(|e| e.to_string())?
@@ -508,7 +723,7 @@ impl Cluster {
             // leader contacts it and replays the child's log from the start.
             let raft = self.start_replica(node, range, start, end, &kv).await?;
             if bootstrap {
-                let _ = raft.initialize(self.members()).await;
+                let _ = raft.initialize(self.members_of(range)).await;
             }
             return Ok(true);
         }
@@ -545,11 +760,23 @@ impl Cluster {
         })
     }
 
-    fn members(&self) -> BTreeMap<NodeId, NodeInfo> {
-        self.node_ids()
+    /// The nodes holding a replica of `range`, as a Raft membership.
+    fn members_of(&self, range: RangeId) -> BTreeMap<NodeId, NodeInfo> {
+        self.replicas_of(range)
             .into_iter()
             .map(|id| (id, info(id)))
             .collect()
+    }
+
+    pub fn replicas_of(&self, range: RangeId) -> BTreeSet<NodeId> {
+        if range == META_RANGE {
+            return self.meta_replicas.clone();
+        }
+        self.ranges()
+            .into_iter()
+            .find(|d| d.id == range)
+            .map(|d| d.replicas)
+            .unwrap_or_default()
     }
 
     /// Whether `range` was created by a split rather than at cluster start.
@@ -662,6 +889,10 @@ impl Cluster {
     /// (Re)start `node` from its on-disk stores, with a replica of every current range.
     pub async fn restart(&self, node: NodeId) -> Result<(), String> {
         let _topology = self.topology.lock().await;
+        self.restart_locked(node).await
+    }
+
+    async fn restart_locked(&self, node: NodeId) -> Result<(), String> {
         let base = self.dir.join(format!("n{node}"));
         // The previous incarnation's handles drop asynchronously; RocksDB's lock frees then.
         let mut attempt = 0;
@@ -679,6 +910,19 @@ impl Cluster {
                 (Err(e), _) | (_, Err(e)) => return Err(format!("node {node}: {e}")),
             }
         };
+        // Replicas moved away while this node was down: delete what they left behind.
+        for d in self.ranges() {
+            if !d.replicas.contains(&node)
+                && kv
+                    .range_interval(d.id)
+                    .map_err(|e| e.to_string())?
+                    .is_some()
+            {
+                kv.wipe_range(d.id, &d.start, &d.end)
+                    .map_err(|e| e.to_string())?;
+                logs.wipe_range(d.id).map_err(|e| e.to_string())?;
+            }
+        }
         {
             let mut nodes = self.nodes.write().expect("cluster lock");
             if let Some(n) = nodes.iter_mut().find(|n| n.id == node) {
@@ -690,6 +934,29 @@ impl Cluster {
             self.start_or_defer(node, r, false).await?;
         }
         Ok(())
+    }
+
+    /// Make `node`'s replica the leader of `range` by having it campaign until it wins (it
+    /// can only win with an up-to-date log). For tests and the harness.
+    pub async fn make_leader(&self, range: RangeId, node: NodeId) -> Result<(), String> {
+        let raft = self
+            .nodes
+            .read()
+            .expect("cluster lock")
+            .iter()
+            .find(|n| n.id == node)
+            .and_then(|n| n.up.as_ref()?.1.get(&range).cloned())
+            .ok_or_else(|| format!("node {node} has no replica of range {range}"))?;
+        let deadline = tokio::time::Instant::now() + LEADER_WAIT;
+        while tokio::time::Instant::now() < deadline {
+            let m = raft.metrics().borrow().clone();
+            if m.state == openraft::ServerState::Leader {
+                return Ok(());
+            }
+            let _ = raft.trigger().elect().await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        Err(format!("node {node} did not win range {range}"))
     }
 
     /// Cut links between nodes in different `groups`, on every range.

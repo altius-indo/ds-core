@@ -483,6 +483,44 @@ fn validate_spans(
     Ok(None)
 }
 
+/// Live data in `[start, end)`: the number of keys whose newest version is not a delete, their
+/// bytes (key plus newest value), and the median such key. One seek per key, so the cost
+/// does not grow with old versions. Drives size-based splits (REQ-0033).
+pub fn live_stats(db: &DB, start: &[u8], end: &[u8]) -> Result<RangeStats, String> {
+    let to = (!end.is_empty()).then(|| version_prefix(end));
+    let mut keys = Vec::new();
+    let mut bytes = 0u64;
+    let mut it = db.raw_iterator();
+    it.seek(version_prefix(start));
+    while let Some(k) = it.key() {
+        if !k.starts_with(&[VERSION]) || to.as_ref().is_some_and(|to| k >= to.as_slice()) {
+            break;
+        }
+        let (key, _) = decode_version_key(k).ok_or("bad version key")?;
+        let value = it.value().map(dec_version).transpose()?.flatten();
+        if let Some(v) = value {
+            bytes += (key.len() + v.len()) as u64;
+            keys.push(key.clone());
+        }
+        let mut next = version_key(&key, 0);
+        next.push(0);
+        it.seek(next);
+    }
+    it.status().map_err(|e| e.to_string())?;
+    Ok(RangeStats {
+        keys: keys.len() as u64,
+        bytes,
+        median: keys.get(keys.len() / 2).cloned(),
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RangeStats {
+    pub keys: u64,
+    pub bytes: u64,
+    pub median: Option<Vec<u8>>,
+}
+
 /// Whether user key `k` falls in `[start, end)` (`end` empty = +∞).
 pub fn owns(start: &[u8], end: &[u8], k: &[u8]) -> bool {
     k >= start && (end.is_empty() || k < end)

@@ -59,6 +59,23 @@ jobs:
           cargo build --quiet --release --locked -p dscore-harness
           target/release/dscore-harness fault leader-kill --trials "${{ env.FULL == 'true' && '100' || '10' }}" --assert-p99-secs 10
 
+  # STORY-0004 E1 (REQ-0033 AC1): a node joins under YCSB workload A; replicas rebalance to
+  # within 10% of the mean with zero failed requests and no lost records.
+  add-node:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: E1 add-node rebalance under YCSB A
+        run: |
+          cargo build --quiet --release --locked -p dscore-harness
+          target/release/dscore-harness scenario add-node --workload ycsb-a \
+            --assert-balance 0.10 --within 1h --assert-zero-errors \
+            --records "${{ env.FULL == 'true' && '20000' || '4000' }}"
+
   # STORY-0002 E1, STORY-0007 E2, STORY-0006 E4, STORY-0005 E2, STORY-0004 E2: Jepsen-style
   # workloads.
   jepsen:

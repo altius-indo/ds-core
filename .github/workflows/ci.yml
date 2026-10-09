@@ -30,6 +30,10 @@ jobs:
         run: cargo build --workspace --locked
       - name: Test
         run: cargo test --workspace --locked
+      # STORY-0010 E1 (REQ-0003 AC1): the GQL conformance matrix lists every ISO/IEC 39075
+      # optional feature with a status.
+      - name: GQL conformance matrix vs ISO/IEC 39075
+        run: scripts/gql/check-matrix.py docs/gql-conformance.toml --against "$(scripts/gql/fetch-iso-features.sh)" --require-status
 
   # STORY-0028 E2 (REQ-0041 AC2): the release suite on native amd64 and arm64 runners.
   suite:

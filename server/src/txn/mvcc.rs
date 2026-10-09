@@ -74,6 +74,8 @@ pub enum TxnStatus {
 pub struct TxnRecord {
     pub status: TxnStatus,
     pub start_ts: Ts,
+    /// The anchor key; a range split moves the record to whichever range owns it.
+    pub anchor: Vec<u8>,
 }
 
 pub type Write = (Vec<u8>, Option<Vec<u8>>);
@@ -89,16 +91,19 @@ pub enum TxnCommand {
     },
     Heartbeat {
         id: TxnId,
+        anchor: Vec<u8>,
         now_ms: u64,
     },
     /// PENDING -> COMMITTED. The single write that decides a 2PC transaction.
     Commit {
         id: TxnId,
+        anchor: Vec<u8>,
         commit_ts: Ts,
     },
     /// Push: PENDING (heartbeat older than `stale_before_ms`) or absent -> ABORTED.
     Abort {
         id: TxnId,
+        anchor: Vec<u8>,
         stale_before_ms: u64,
     },
     /// Turn this transaction's intents on `keys` into versions at `commit_ts`, or drop them.
@@ -127,9 +132,7 @@ pub enum TxnCommand {
         keys: Vec<Vec<u8>>,
     },
     /// Raise the timestamp oracle's persisted high-water mark (never lowers it).
-    TsoAdvance {
-        hwm: Ts,
-    },
+    TsoAdvance { hwm: Ts },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,8 +146,44 @@ pub enum Conflict {
     Aborted,
 }
 
+impl TxnCommand {
+    /// Keys and spans this command reads or writes; the range applying it must own all of
+    /// them, or it answers `RangeMismatch` (the sender routed with a stale descriptor).
+    pub fn footprint(&self) -> (Vec<&[u8]>, Vec<&Span>) {
+        match self {
+            TxnCommand::Prewrite {
+                txn,
+                writes,
+                record,
+                ..
+            } => {
+                let mut keys: Vec<&[u8]> = writes.iter().map(|(k, _)| k.as_slice()).collect();
+                if *record {
+                    keys.push(&txn.anchor);
+                }
+                (keys, Vec::new())
+            }
+            TxnCommand::Heartbeat { anchor, .. }
+            | TxnCommand::Commit { anchor, .. }
+            | TxnCommand::Abort { anchor, .. } => (vec![anchor.as_slice()], Vec::new()),
+            TxnCommand::Resolve { keys, .. } => {
+                (keys.iter().map(Vec::as_slice).collect(), Vec::new())
+            }
+            TxnCommand::Validate { spans, .. } => (Vec::new(), spans.iter().collect()),
+            TxnCommand::CommitLocal { keys, reads, .. } => (
+                keys.iter().map(Vec::as_slice).collect(),
+                reads.iter().collect(),
+            ),
+            TxnCommand::TsoAdvance { .. } => (Vec::new(), Vec::new()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TxnResponse {
+    /// The range does not own every key the command touches: it was routed with a stale
+    /// descriptor (e.g. across a split). Nothing was applied.
+    RangeMismatch,
     Ok,
     Conflict(Conflict),
     Record(Option<TxnRecord>),
@@ -411,34 +450,65 @@ fn validate_spans(
             }
         }
         // A version committed inside (start_ts, commit_ts], including inserts (phantoms).
-        let from = version_prefix(&span.start);
+        // Versions sort by user key, newest first, so per key one seek to commit_ts finds the
+        // newest version at or below it, and a second skips the key's older versions: the
+        // cost is per distinct key, not per version ever written.
         let to = version_prefix(&span.end);
-        for item in db.iterator(IteratorMode::From(&from, Direction::Forward)) {
-            let (k, _) = item.map_err(|e| e.to_string())?;
-            if k.as_ref() >= to.as_slice() {
+        let mut it = db.raw_iterator();
+        it.seek(version_prefix(&span.start));
+        while let Some(k) = it.key() {
+            if k >= to.as_slice() {
                 break;
             }
-            if let Some((key, cts)) = decode_version_key(&k)
+            let (key, _) = decode_version_key(k).ok_or("bad version key")?;
+            let prefix = version_prefix(&key);
+            it.seek(version_key(&key, commit_ts));
+            if let Some(k) = it.key()
+                && k.starts_with(&prefix)
+                && let Some((_, cts)) = decode_version_key(k)
                 && cts > start_ts
-                && cts <= commit_ts
             {
                 return Ok(Some(Conflict::NewerVersion {
                     key,
                     commit_ts: cts,
                 }));
             }
+            // The last possible version key of `key` is version_key(key, 0); seek just past it.
+            let mut next = version_key(&key, 0);
+            next.push(0);
+            it.seek(next);
         }
+        it.status().map_err(|e| e.to_string())?;
     }
     Ok(None)
 }
 
-/// Apply one transaction command: read `db`, stage writes in `batch`.
+/// Whether user key `k` falls in `[start, end)` (`end` empty = +∞).
+pub fn owns(start: &[u8], end: &[u8], k: &[u8]) -> bool {
+    k >= start && (end.is_empty() || k < end)
+}
+
+/// Whether span `s` lies wholly inside `[start, end)`.
+pub fn owns_span(start: &[u8], end: &[u8], s: &Span) -> bool {
+    s.start.as_slice() >= start && (end.is_empty() || s.end.as_slice() <= end)
+}
+
+/// Apply one transaction command for the range owning user keys `[start, end)`: read `db`,
+/// stage writes in `batch`. A command touching keys outside the interval changes nothing and
+/// answers `RangeMismatch`.
 pub fn apply(
     db: &DB,
     batch: &mut WriteBatch,
     range: RangeId,
+    interval: (&[u8], &[u8]),
     cmd: &TxnCommand,
 ) -> Result<TxnResponse, String> {
+    let (start, end) = interval;
+    let (keys, spans) = cmd.footprint();
+    if !keys.iter().all(|k| owns(start, end, k)) || !spans.iter().all(|s| owns_span(start, end, s))
+    {
+        return Ok(TxnResponse::RangeMismatch);
+    }
     Ok(match cmd {
         TxnCommand::Prewrite {
             txn,
@@ -460,6 +530,7 @@ pub fn apply(
                                 heartbeat_ms: *now_ms,
                             },
                             start_ts: txn.start_ts,
+                            anchor: txn.anchor.clone(),
                         }),
                     ),
                 }
@@ -493,7 +564,7 @@ pub fn apply(
             }
             TxnResponse::Ok
         }
-        TxnCommand::Heartbeat { id, now_ms } => match get_record(db, range, *id)? {
+        TxnCommand::Heartbeat { id, now_ms, .. } => match get_record(db, range, *id)? {
             Some(
                 mut r @ TxnRecord {
                     status: TxnStatus::Pending { .. },
@@ -508,7 +579,7 @@ pub fn apply(
             }
             other => TxnResponse::Record(other),
         },
-        TxnCommand::Commit { id, commit_ts } => match get_record(db, range, *id)? {
+        TxnCommand::Commit { id, commit_ts, .. } => match get_record(db, range, *id)? {
             Some(
                 mut r @ TxnRecord {
                     status: TxnStatus::Pending { .. },
@@ -529,15 +600,18 @@ pub fn apply(
         },
         TxnCommand::Abort {
             id,
+            anchor,
             stale_before_ms,
         } => match get_record(db, range, *id)? {
             Some(TxnRecord {
                 status: TxnStatus::Pending { heartbeat_ms },
                 start_ts,
+                anchor,
             }) if heartbeat_ms < *stale_before_ms => {
                 let r = TxnRecord {
                     status: TxnStatus::Aborted,
                     start_ts,
+                    anchor,
                 };
                 batch.put(record_key(range, *id), enc(&r));
                 TxnResponse::Record(Some(r))
@@ -547,6 +621,7 @@ pub fn apply(
                 let r = TxnRecord {
                     status: TxnStatus::Aborted,
                     start_ts: 0,
+                    anchor: anchor.clone(),
                 };
                 batch.put(record_key(range, *id), enc(&r));
                 TxnResponse::Record(Some(r))
@@ -624,6 +699,39 @@ pub fn apply(
             TxnResponse::TsoHwm(next)
         }
     })
+}
+
+/// A transaction record moving between ranges: (old key, new key, encoded record).
+pub type RecordMove = (Vec<u8>, Vec<u8>, Vec<u8>);
+
+/// Records of `range` whose anchor is at or after `at`, re-keyed for `new_range`. Used by a split.
+pub fn records_to_move(
+    db: &DB,
+    range: RangeId,
+    new_range: RangeId,
+    at: &[u8],
+) -> Result<Vec<RecordMove>, openraft::AnyError> {
+    let mut lo = vec![RECORD];
+    lo.extend_from_slice(&range.to_be_bytes());
+    let mut hi = vec![RECORD];
+    hi.extend_from_slice(&(range + 1).to_be_bytes());
+    let mut out = Vec::new();
+    for item in db.iterator(IteratorMode::From(&lo, Direction::Forward)) {
+        let (k, v) = item.map_err(|e| openraft::AnyError::new(&e))?;
+        if k.as_ref() >= hi.as_slice() {
+            break;
+        }
+        let rec: TxnRecord = dec(&v).map_err(openraft::AnyError::error)?;
+        if rec.anchor.as_slice() >= at {
+            let id = TxnId::from_be_bytes(
+                k[1 + 8..]
+                    .try_into()
+                    .map_err(|_| openraft::AnyError::error("record key"))?,
+            );
+            out.push((k.to_vec(), record_key(new_range, id), v.to_vec()));
+        }
+    }
+    Ok(out)
 }
 
 pub fn tso_hwm(db: &DB, range: RangeId) -> Result<Ts, String> {

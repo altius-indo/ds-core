@@ -102,8 +102,8 @@ jobs:
               $h jepsen --workload register --internal-retry on --duration "$DURATION" --check lost-update,serializable
               $h jepsen --workload register --internal-retry off --duration 30s --check lost-update,serializable ;;
             list-append)
-              # membership and split nemeses arrive with TASK-0008 (dynamic membership and splits).
-              $h jepsen --workload list-append --nemesis partition,crash,clock --duration "$DURATION" --check serializable --history list-append.edn ;;
+              # The membership nemesis arrives with per-range replica sets (TASK-0008 step 2).
+              $h jepsen --workload list-append --nemesis partition,crash,clock,split --duration "$DURATION" --check serializable --history list-append.edn ;;
           esac
       - if: always() && matrix.workload == 'list-append'
         uses: actions/upload-artifact@v4

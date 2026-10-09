@@ -85,6 +85,23 @@ fn skewed_now_ms(skew: &AtomicI64) -> u64 {
         .max(0) as u64
 }
 
+/// The parts of `span` owned by each range in `ranges` (sorted descriptors).
+fn clip_to_ranges(ranges: &[super::cluster::RangeDesc], span: &Span) -> Vec<(RangeId, Span)> {
+    ranges
+        .iter()
+        .filter(|r| r.overlaps(span))
+        .map(|r| {
+            let start = span.start.clone().max(r.start.clone());
+            let end = if r.end.is_empty() {
+                span.end.clone()
+            } else {
+                span.end.clone().min(r.end.clone())
+            };
+            (r.id, Span { start, end })
+        })
+        .collect()
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -93,6 +110,12 @@ fn now_ms() -> u64 {
 
 fn internal(e: impl std::fmt::Display) -> DsError {
     DsError::new(ErrorCode::Internal, e.to_string())
+}
+
+/// A command reached a range that no longer owns its keys (a split moved them). The
+/// transaction aborts with a retryable conflict; a retry routes with fresh descriptors.
+fn range_moved() -> DsError {
+    DsError::conflict("a range split moved keys this transaction touches; retry")
 }
 
 fn conflict_message(c: &Conflict) -> String {
@@ -170,6 +193,30 @@ impl TxnClient {
         }
     }
 
+    /// Resolve this transaction's intents on `keys`, grouped by the ranges that own them now.
+    async fn resolve(&self, id: TxnId, keys: Vec<Vec<u8>>, commit_ts: Option<Ts>) {
+        let mut by_range: BTreeMap<RangeId, Vec<Vec<u8>>> = BTreeMap::new();
+        for k in keys {
+            by_range
+                .entry(self.cluster.range_for(&k).id)
+                .or_default()
+                .push(k);
+        }
+        for (range, keys) in by_range {
+            let _ = self
+                .cluster
+                .propose(
+                    range,
+                    TxnCommand::Resolve {
+                        id,
+                        keys,
+                        commit_ts,
+                    },
+                )
+                .await;
+        }
+    }
+
     pub async fn begin(&self) -> Result<Txn, DsError> {
         let start_ts = self.tso.next().await?;
         let nanos = SystemTime::now()
@@ -199,13 +246,16 @@ impl TxnClient {
         give_up: tokio::time::Instant,
     ) -> Result<(), DsError> {
         let id = intent.txn.id;
-        let anchor_range = self.cluster.range_for(&intent.txn.anchor).id;
-        let key_range = self.cluster.range_for(key).id;
+        // The record lives with its anchor; a split may have moved it to another range.
         let record = self
             .cluster
-            .read(anchor_range, |db| mvcc::get_record(db, anchor_range, id))
+            .read_key(&intent.txn.anchor, |db, range| {
+                mvcc::get_record(db, range, id)
+            })
             .await?
             .map_err(internal)?;
+        let anchor_range = self.cluster.range_for(&intent.txn.anchor).id;
+        let key_range = self.cluster.range_for(key).id;
         let ttl = self.cfg.liveness_ttl.as_millis() as u64;
         let decided: Option<Option<Ts>> = match record.map(|r| r.status) {
             Some(TxnStatus::Committed { commit_ts }) => Some(Some(commit_ts)),
@@ -214,6 +264,7 @@ impl TxnClient {
             _ => {
                 let push = TxnCommand::Abort {
                     id,
+                    anchor: intent.txn.anchor.clone(),
                     stale_before_ms: self.now().saturating_sub(ttl),
                 };
                 match self.cluster.propose(anchor_range, push).await? {
@@ -276,14 +327,13 @@ impl Txn {
             return Ok(v.clone());
         }
         self.reads.push(Span::point(key));
-        let range = self.client.cluster.range_for(key).id;
         let give_up = tokio::time::Instant::now() + self.client.cfg.lock_wait;
         let (ts, me) = (self.meta.start_ts, self.meta.id);
         loop {
             let r = self
                 .client
                 .cluster
-                .read(range, |db| mvcc::read(db, key, ts, Some(me)))
+                .read_key(key, |db, _| mvcc::read(db, key, ts, Some(me)))
                 .await?
                 .map_err(internal)?;
             match r {
@@ -305,36 +355,33 @@ impl Txn {
         };
         self.reads.push(span.clone());
         let mut out = Vec::new();
-        let ranges: Vec<_> = self.client.cluster.ranges.clone();
-        for r in ranges
-            .iter()
-            .filter(|r| r.start.as_slice() < end && (r.end.is_empty() || r.end.as_slice() > start))
-        {
-            let part = Span {
-                start: span.start.clone().max(r.start.clone()),
-                end: if r.end.is_empty() {
-                    span.end.clone()
-                } else {
-                    span.end.clone().min(r.end.clone())
-                },
-            };
-            let give_up = tokio::time::Instant::now() + self.client.cfg.lock_wait;
-            let (ts, me) = (self.meta.start_ts, self.meta.id);
-            loop {
-                let res = self
-                    .client
-                    .cluster
-                    .read(r.id, |db| mvcc::scan(db, &part, ts, Some(me)))
-                    .await?
-                    .map_err(internal)?;
-                match res {
-                    Ok(pairs) => {
-                        out.extend(pairs);
-                        break;
+        let (ts, me) = (self.meta.start_ts, self.meta.id);
+        'whole: loop {
+            out.clear();
+            for (range, part) in clip_to_ranges(&self.client.cluster.ranges(), &span) {
+                let give_up = tokio::time::Instant::now() + self.client.cfg.lock_wait;
+                loop {
+                    let res = self
+                        .client
+                        .cluster
+                        .read_span(range, &part, |db| mvcc::scan(db, &part, ts, Some(me)))
+                        .await?;
+                    match res {
+                        // A split moved part of the span: start over with fresh descriptors.
+                        None => continue 'whole,
+                        Some(r) => match r.map_err(internal)? {
+                            Ok(pairs) => {
+                                out.extend(pairs);
+                                break;
+                            }
+                            Err((key, intent)) => {
+                                self.client.handle_intent(&intent, &key, give_up).await?
+                            }
+                        },
                     }
-                    Err((key, intent)) => self.client.handle_intent(&intent, &key, give_up).await?,
                 }
             }
+            break;
         }
         // Overlay buffered writes.
         for (k, v) in self.writes.range(span.start.clone()..span.end.clone()) {
@@ -385,13 +432,12 @@ impl Txn {
                 .or_default()
                 .push((k.clone(), v.clone()));
         }
+        // Each range validates only its part of every read span.
         let mut reads_by_range: BTreeMap<RangeId, Vec<Span>> = BTreeMap::new();
+        let ranges = cluster.ranges();
         for s in &self.reads {
-            for r in cluster.ranges.iter().filter(|r| {
-                r.start.as_slice() < s.end.as_slice()
-                    && (r.end.is_empty() || r.end.as_slice() > s.start.as_slice())
-            }) {
-                reads_by_range.entry(r.id).or_default().push(s.clone());
+            for (range, part) in clip_to_ranges(&ranges, s) {
+                reads_by_range.entry(range).or_default().push(part);
             }
         }
         let touched: BTreeSet<RangeId> = writes_by_range
@@ -410,7 +456,12 @@ impl Txn {
         let anchor_range = cluster.range_for(&self.meta.anchor).id;
         let heartbeat_stop = Arc::new(AtomicBool::new(false));
         {
-            let (cluster, stop, id) = (cluster.clone(), heartbeat_stop.clone(), self.meta.id);
+            let (cluster, stop, id, anchor) = (
+                cluster.clone(),
+                heartbeat_stop.clone(),
+                self.meta.id,
+                self.meta.anchor.clone(),
+            );
             let every = self.client.cfg.liveness_ttl / 3;
             let skew = self.client.clock_skew_ms.clone();
             tokio::spawn(async move {
@@ -424,6 +475,7 @@ impl Txn {
                             anchor_range,
                             TxnCommand::Heartbeat {
                                 id,
+                                anchor: anchor.clone(),
                                 now_ms: skewed_now_ms(&skew),
                             },
                         )
@@ -461,6 +513,11 @@ impl Txn {
             };
             match cluster.propose(*range, cmd).await {
                 Ok(TxnResponse::Ok) => prewritten.push(*range),
+                Ok(TxnResponse::RangeMismatch) => {
+                    self.rollback(&prewritten, &writes_by_range, anchor_range, &heartbeat_stop)
+                        .await;
+                    return Err(range_moved());
+                }
                 Ok(TxnResponse::Conflict(c)) => {
                     self.rollback(&prewritten, &writes_by_range, anchor_range, &heartbeat_stop)
                         .await;
@@ -506,6 +563,11 @@ impl Txn {
             heartbeat_stop.store(true, Ordering::Relaxed);
             return match result? {
                 TxnResponse::Ok => Ok(commit_ts),
+                TxnResponse::RangeMismatch => {
+                    self.rollback(&prewritten, &writes_by_range, anchor_range, &heartbeat_stop)
+                        .await;
+                    Err(range_moved())
+                }
                 TxnResponse::Conflict(c) => {
                     self.rollback(&prewritten, &writes_by_range, anchor_range, &heartbeat_stop)
                         .await;
@@ -523,6 +585,11 @@ impl Txn {
             };
             match cluster.propose(*range, cmd).await? {
                 TxnResponse::Ok => {}
+                TxnResponse::RangeMismatch => {
+                    self.rollback(&prewritten, &writes_by_range, anchor_range, &heartbeat_stop)
+                        .await;
+                    return Err(range_moved());
+                }
                 TxnResponse::Conflict(c) => {
                     self.rollback(&prewritten, &writes_by_range, anchor_range, &heartbeat_stop)
                         .await;
@@ -545,12 +612,18 @@ impl Txn {
                 anchor_range,
                 TxnCommand::Commit {
                     id: self.meta.id,
+                    anchor: self.meta.anchor.clone(),
                     commit_ts,
                 },
             )
             .await?
         {
             TxnResponse::Ok => {}
+            TxnResponse::RangeMismatch => {
+                self.rollback(&prewritten, &writes_by_range, anchor_range, &heartbeat_stop)
+                    .await;
+                return Err(range_moved());
+            }
             TxnResponse::Conflict(c) => {
                 self.rollback(&prewritten, &writes_by_range, anchor_range, &heartbeat_stop)
                     .await;
@@ -568,15 +641,9 @@ impl Txn {
                 .iter()
                 .map(|(k, _)| k.clone())
                 .collect();
-            let _ = cluster
-                .propose(
-                    *range,
-                    TxnCommand::Resolve {
-                        id: self.meta.id,
-                        keys,
-                        commit_ts: Some(commit_ts),
-                    },
-                )
+            // Re-routed by current descriptors; intents left behind are resolved by readers.
+            self.client
+                .resolve(self.meta.id, keys, Some(commit_ts))
                 .await;
             if i == 0
                 && let Some(r) = crash_here(CrashPoint::AfterFirstResolve)
@@ -587,40 +654,33 @@ impl Txn {
         Ok(commit_ts)
     }
 
-    /// Abort before the commit point: mark the record ABORTED, drop our intents.
+    /// Abort before the commit point: mark the record ABORTED, drop our intents. Routes by the
+    /// current descriptors, since a split may have moved the anchor or keys meanwhile.
     async fn rollback(
         &self,
-        prewritten: &[RangeId],
+        _prewritten: &[RangeId],
         writes_by_range: &BTreeMap<RangeId, Vec<mvcc::Write>>,
-        anchor_range: RangeId,
+        _anchor_range: RangeId,
         heartbeat_stop: &AtomicBool,
     ) {
         heartbeat_stop.store(true, Ordering::Relaxed);
         let cluster = &self.client.cluster;
+        let anchor_range = cluster.range_for(&self.meta.anchor).id;
         let _ = cluster
             .propose(
                 anchor_range,
                 TxnCommand::Abort {
                     id: self.meta.id,
+                    anchor: self.meta.anchor.clone(),
                     stale_before_ms: u64::MAX,
                 },
             )
             .await;
-        for range in prewritten {
-            let keys = writes_by_range[range]
-                .iter()
-                .map(|(k, _)| k.clone())
-                .collect();
-            let _ = cluster
-                .propose(
-                    *range,
-                    TxnCommand::Resolve {
-                        id: self.meta.id,
-                        keys,
-                        commit_ts: None,
-                    },
-                )
-                .await;
-        }
+        let keys: Vec<Vec<u8>> = writes_by_range
+            .values()
+            .flatten()
+            .map(|(k, _)| k.clone())
+            .collect();
+        self.client.resolve(self.meta.id, keys, None).await;
     }
 }

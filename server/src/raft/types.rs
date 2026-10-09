@@ -38,6 +38,12 @@ pub enum Command {
     Batch(Vec<Command>),
     /// MVCC transaction operation (txn::mvcc).
     Txn(TxnCommand),
+    /// Split this range at `at`: it keeps `[start, at)`, and `new_range` takes `[at, end)` with
+    /// the same replicas (REQ-0033). No data moves; transaction records follow their anchors.
+    Split {
+        at: Vec<u8>,
+        new_range: RangeId,
+    },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

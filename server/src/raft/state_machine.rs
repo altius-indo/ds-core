@@ -7,7 +7,7 @@
 
 use std::io::Cursor;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use openraft::storage::{RaftSnapshotBuilder, RaftStateMachine, Snapshot};
 use openraft::{AnyError, EntryPayload, OptionalSend};
@@ -25,6 +25,10 @@ const DATA: u8 = 0x10;
 const META: u8 = 0x11;
 const APPLIED: u8 = b'a';
 const MEMBERSHIP: u8 = b'm';
+const INTERVAL: u8 = b'i';
+
+/// A range's user-key interval `[start, end)` (`end` empty = +∞).
+pub type Interval = (Vec<u8>, Vec<u8>);
 
 fn data_key(user_key: &[u8]) -> Vec<u8> {
     let mut k = Vec::with_capacity(1 + user_key.len());
@@ -64,18 +68,58 @@ impl KvEngine {
         &self.db
     }
 
-    /// The state machine for `range`, owning user keys in `[start, end)` (`end` empty = +∞).
+    /// The interval `range` owns on this store, as last applied (splits included).
+    pub fn range_interval(&self, range: RangeId) -> Result<Option<Interval>, rocksdb::Error> {
+        Ok(self
+            .db
+            .get(meta_key(range, INTERVAL))?
+            .and_then(|b| postcard::from_bytes(&b).ok()))
+    }
+
+    /// Every range this store holds, with its interval (for restarting after splits).
+    pub fn ranges(&self) -> Result<Vec<(RangeId, Interval)>, rocksdb::Error> {
+        let mut out = Vec::new();
+        for item in self
+            .db
+            .iterator(IteratorMode::From(&[META], Direction::Forward))
+        {
+            let (k, v) = item?;
+            if k.first() != Some(&META) {
+                break;
+            }
+            if k.len() == 10 && k[9] == INTERVAL {
+                let range = RangeId::from_be_bytes(k[1..9].try_into().expect("8-byte range id"));
+                if let Ok(i) = postcard::from_bytes(&v) {
+                    out.push((range, i));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// The state machine for `range`. A range created by a split, or restarted, uses its
+    /// persisted interval; otherwise `[start, end)` is recorded as its initial interval.
     pub fn range(
         self: &Arc<Self>,
         range: RangeId,
         start: Vec<u8>,
         end: Vec<u8>,
     ) -> RangeStateMachine {
+        let interval = match self.range_interval(range) {
+            Ok(Some(i)) => i,
+            _ => {
+                let i = (start, end);
+                let _ = self.db.put(
+                    meta_key(range, INTERVAL),
+                    postcard::to_allocvec(&i).expect("interval encodes"),
+                );
+                i
+            }
+        };
         RangeStateMachine {
             engine: self.clone(),
             range,
-            start,
-            end,
+            interval: Arc::new(RwLock::new(interval)),
             snapshot: Arc::new(Mutex::new(None)),
         }
     }
@@ -99,8 +143,7 @@ struct StoredSnapshot {
 pub struct RangeStateMachine {
     engine: Arc<KvEngine>,
     range: RangeId,
-    start: Vec<u8>,
-    end: Vec<u8>,
+    interval: Arc<RwLock<Interval>>,
     snapshot: Arc<Mutex<Option<StoredSnapshot>>>,
 }
 
@@ -130,23 +173,60 @@ impl RangeStateMachine {
             Command::Put { key, value } => batch.put(data_key(key), value),
             Command::Delete { key } => batch.delete(data_key(key)),
             Command::Batch(cmds) => cmds.iter().for_each(|c| Self::apply_command(batch, c)),
-            // Transaction commands are applied at top level (see `apply`), never inside a Batch.
-            Command::Txn(_) => {}
+            // Transaction commands and splits are applied at top level (see `apply`).
+            Command::Txn(_) | Command::Split { .. } => {}
         }
     }
 
     /// Raw kvdb intervals this range owns: plain data plus MVCC versions, intents, records and
     /// the TSO mark. Snapshots carry exactly these.
     fn owned(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
-        let data_lo = data_key(&self.start);
-        let data_hi = if self.end.is_empty() {
+        let (start, end) = self.interval.read().expect("interval lock").clone();
+        let data_lo = data_key(&start);
+        let data_hi = if end.is_empty() {
             vec![DATA + 1]
         } else {
-            data_key(&self.end)
+            data_key(&end)
         };
         let mut spans = vec![(data_lo, data_hi)];
-        spans.extend(mvcc::owned_spans(self.range, &self.start, &self.end));
+        spans.extend(mvcc::owned_spans(self.range, &start, &end));
+        // The interval itself travels with snapshots, so a replica rebuilt after a split
+        // learns its bounds.
+        let mut hi = meta_key(self.range, INTERVAL);
+        hi.push(0);
+        spans.push((meta_key(self.range, INTERVAL), hi));
         spans
+    }
+
+    /// Split at `at` (see Command::Split); false if `at` is not strictly inside the interval.
+    fn split(
+        &self,
+        batch: &mut WriteBatch,
+        at: &[u8],
+        new_range: RangeId,
+    ) -> Result<bool, AnyError> {
+        let (start, end) = self.interval.read().expect("interval lock").clone();
+        if at <= start.as_slice() || (!end.is_empty() && at >= end.as_slice()) {
+            return Ok(false);
+        }
+        batch.put(
+            meta_key(self.range, INTERVAL),
+            encode(&(start, at.to_vec()))?,
+        );
+        batch.put(meta_key(new_range, INTERVAL), encode(&(at.to_vec(), end))?);
+        for (old_key, new_key, record) in
+            mvcc::records_to_move(&self.engine.db, self.range, new_range, at)?
+        {
+            batch.delete(old_key);
+            batch.put(new_key, record);
+        }
+        Ok(true)
+    }
+
+    fn reload_interval(&self) {
+        if let Ok(Some(i)) = self.engine.range_interval(self.range) {
+            *self.interval.write().expect("interval lock") = i;
+        }
     }
 
     fn pairs(&self) -> Result<Vec<KvPair>, AnyError> {
@@ -227,10 +307,23 @@ impl RaftStateMachine<TypeConfig> for RangeStateMachine {
             let mut batch = WriteBatch::default();
             let result = match &e.payload {
                 EntryPayload::Blank => CommandResult::Ok,
-                EntryPayload::Normal(Command::Txn(cmd)) => CommandResult::Txn(
-                    mvcc::apply(&self.engine.db, &mut batch, self.range, cmd)
-                        .map_err(|err| StorageIOError::apply(e.log_id, AnyError::error(err)))?,
-                ),
+                EntryPayload::Normal(Command::Txn(cmd)) => {
+                    let (start, end) = self.interval.read().expect("interval lock").clone();
+                    CommandResult::Txn(
+                        mvcc::apply(&self.engine.db, &mut batch, self.range, (&start, &end), cmd)
+                            .map_err(|err| StorageIOError::apply(e.log_id, AnyError::error(err)))?,
+                    )
+                }
+                EntryPayload::Normal(Command::Split { at, new_range }) => {
+                    if self
+                        .split(&mut batch, at, *new_range)
+                        .map_err(|err| StorageIOError::apply(e.log_id, err))?
+                    {
+                        CommandResult::Ok
+                    } else {
+                        CommandResult::Txn(crate::txn::mvcc::TxnResponse::RangeMismatch)
+                    }
+                }
                 EntryPayload::Normal(cmd) => {
                     Self::apply_command(&mut batch, cmd);
                     CommandResult::Ok
@@ -252,6 +345,9 @@ impl RaftStateMachine<TypeConfig> for RangeStateMachine {
                 .db
                 .write(batch)
                 .map_err(|err| StorageIOError::write_state_machine(&err))?;
+            if matches!(&e.payload, EntryPayload::Normal(Command::Split { .. })) {
+                self.reload_interval();
+            }
             results.push(result);
         }
         Ok(results)
@@ -292,6 +388,7 @@ impl RaftStateMachine<TypeConfig> for RangeStateMachine {
             .db
             .write(batch)
             .map_err(|e| StorageIOError::write_state_machine(&e))?;
+        self.reload_interval();
         *self.snapshot.lock().expect("snapshot lock") = Some(StoredSnapshot {
             meta: meta.clone(),
             data,

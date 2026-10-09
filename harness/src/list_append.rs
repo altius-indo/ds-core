@@ -11,8 +11,10 @@
 //! lists and searches the dependency graph for cycles: any G0, G1a/b/c, G-single or G2
 //! anomaly fails the serializable check.
 //!
-//! Not yet available: the `membership` and `split` nemeses (dynamic range membership and
-//! splits arrive with TASK-0008).
+//! The `split` nemesis splits the range owning a random key at (or just past) that key, under
+//! load; splits are permanent, so the range count grows over the run and in-flight
+//! transactions see their routing go stale mid-commit (REQ-0033, STORY-0004 E2). Not yet
+//! available: the `membership` nemesis (per-range replica sets arrive with TASK-0008 step 2).
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -34,6 +36,7 @@ pub enum Nemesis {
     Partition,
     Crash,
     Clock,
+    Split,
 }
 
 pub fn parse_nemeses(s: &str) -> Result<Vec<Nemesis>, String> {
@@ -43,8 +46,9 @@ pub fn parse_nemeses(s: &str) -> Result<Vec<Nemesis>, String> {
             "partition" => Nemesis::Partition,
             "crash" => Nemesis::Crash,
             "clock" => Nemesis::Clock,
-            "membership" | "split" => {
-                return Err(format!("nemesis `{n}` is not available yet: dynamic membership and range splits arrive with TASK-0008"));
+            "split" => Nemesis::Split,
+            "membership" => {
+                return Err("nemesis `membership` is not available yet: per-range replica sets arrive with TASK-0008".into());
             }
             other => return Err(format!("unknown nemesis `{other}`")),
         });
@@ -148,6 +152,16 @@ async fn run_txn(client: &TxnClient, mut ops: Vec<Op>) -> Result<Option<Vec<Op>>
         Err(e) if e.code == ErrorCode::SerializationConflict => Ok(None),
         Err(_) => Err(()),
     }
+}
+
+static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+fn log_fault(faults: &mut Vec<String>, f: String) {
+    eprintln!(
+        "[{:?}] nemesis: {f}",
+        START.get_or_init(Instant::now).elapsed()
+    );
+    faults.push(f);
 }
 
 pub async fn run(
@@ -254,13 +268,13 @@ pub async fn run(
             Nemesis::Partition => {
                 let rest: Vec<u64> = nodes.iter().copied().filter(|n| *n != victim).collect();
                 cluster.partition(&[&[victim], &rest]);
-                faults.push(format!("partition {victim} | {rest:?}"));
+                log_fault(&mut faults, format!("partition {victim} | {rest:?}"));
                 tokio::time::sleep(Duration::from_secs(3)).await;
                 cluster.heal();
             }
             Nemesis::Crash => {
                 cluster.crash(victim).await;
-                faults.push(format!("crash {victim}"));
+                log_fault(&mut faults, format!("crash {victim}"));
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 cluster.restart(victim).await?;
             }
@@ -268,9 +282,28 @@ pub async fn run(
                 let c = (next() % clients.len() as u64) as usize;
                 let skew = (next() % 20_000) as i64 - 10_000;
                 clients[c].set_clock_skew_ms(skew);
-                faults.push(format!("clock client {c} skew {skew} ms"));
+                log_fault(&mut faults, format!("clock client {c} skew {skew} ms"));
                 tokio::time::sleep(Duration::from_secs(3)).await;
                 clients[c].set_clock_skew_ms(0);
+            }
+            Nemesis::Split => {
+                let mut at = key((next() % KEYS as u64) as usize);
+                if next() % 2 == 0 {
+                    at.push(b'~');
+                }
+                let range = cluster.range_for(&at).id;
+                let label = String::from_utf8_lossy(&at).into_owned();
+                match cluster.split(range, &at).await {
+                    Ok(child) => log_fault(
+                        &mut faults,
+                        format!("split range {range} at {label} -> {child}"),
+                    ),
+                    // Already a boundary, or the leader moved mid-proposal: not a fault.
+                    Err(e) => log_fault(
+                        &mut faults,
+                        format!("split range {range} at {label} skipped: {e}"),
+                    ),
+                }
             }
         }
     }

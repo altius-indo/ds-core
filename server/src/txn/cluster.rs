@@ -28,6 +28,8 @@ use crate::raft::state_machine::{Interval, KvEngine};
 use crate::raft::types::{Command, CommandResult, NodeId, NodeInfo, Raft, RangeId};
 
 pub const META_RANGE: RangeId = 0;
+/// How long `split` keeps re-proposing an undecided split before giving up.
+const SPLIT_WAIT: Duration = Duration::from_secs(60);
 /// Sentinel interval for the meta range: `[x, x)` owns no user keys.
 const META_INTERVAL: &[u8] = b"\xff\xffmeta";
 
@@ -66,6 +68,9 @@ pub struct Cluster {
     ranges: RwLock<Vec<RangeDesc>>,
     routers: RwLock<HashMap<RangeId, Arc<Router>>>,
     next_range: AtomicU64,
+    /// Serializes topology changes (split, crash, restart): a node restarting mid-split must
+    /// see the child range either in the descriptors or in the split's replica start-up.
+    topology: tokio::sync::Mutex<()>,
     dir: PathBuf,
     config: Config,
 }
@@ -131,6 +136,7 @@ impl Cluster {
                     .collect(),
             ),
             next_range: AtomicU64::new(ranges.len() as u64 + 1),
+            topology: tokio::sync::Mutex::new(()),
             ranges: RwLock::new(ranges),
             routers: RwLock::new(routers),
             dir: dir.to_path_buf(),
@@ -348,6 +354,7 @@ impl Cluster {
     /// has the same replicas and serves once it has elected a leader. Requests routed with the
     /// old descriptor get `RangeMismatch` meanwhile and retry.
     pub async fn split(&self, range: RangeId, at: &[u8]) -> Result<RangeId, String> {
+        let _topology = self.topology.lock().await;
         let parent = self
             .ranges()
             .into_iter()
@@ -361,12 +368,25 @@ impl Cluster {
             at: at.to_vec(),
             new_range: child,
         };
-        match self.write(range, cmd).await.map_err(|e| e.to_string())? {
-            CommandResult::Ok => {}
-            other => return Err(format!("range {range} refused the split: {other:?}")),
+        // Keep proposing until the outcome is definite: a proposal that timed out may still
+        // commit, and giving up then would leave the parent shrunk with no child group. The
+        // split is idempotent, so a repeat of a committed split reports success.
+        let deadline = tokio::time::Instant::now() + SPLIT_WAIT;
+        loop {
+            match self.write(range, cmd.clone()).await {
+                Ok(CommandResult::Ok) => break,
+                Ok(other) => return Err(format!("range {range} refused the split: {other:?}")),
+                Err(e) if tokio::time::Instant::now() >= deadline => {
+                    // Still uncertain: the child id stays reserved and unrouted. The keys it
+                    // would own are unavailable until an operator retries, but never wrong.
+                    return Err(format!("split of range {range} undecided: {e}"));
+                }
+                Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+            }
         }
-        // Bring up the child group on every live node. A node that applies the split later,
-        // or restarts, finds the same interval persisted by the parent's log.
+        // Bring up the child group on every live node, each initialized with the same
+        // membership so any of them can lead. A node that is down now gets its replica when it
+        // restarts (the descriptor below), and catches up from the child's leader.
         self.routers
             .write()
             .expect("cluster lock")
@@ -376,15 +396,13 @@ impl Cluster {
             .into_iter()
             .map(|id| (id, info(id)))
             .collect();
-        let mut first = None;
         for (id, (kv, _)) in self.snapshot() {
-            let raft = self
+            if let Ok(raft) = self
                 .start_replica(id, child, at.to_vec(), parent.end.clone(), &kv)
-                .await?;
-            first.get_or_insert(raft);
-        }
-        if let Some(r) = first {
-            let _ = r.initialize(members).await;
+                .await
+            {
+                let _ = raft.initialize(members.clone()).await;
+            }
         }
         {
             let mut ranges = self.ranges.write().expect("cluster lock");
@@ -444,6 +462,7 @@ impl Cluster {
 
     /// Stop every replica on `node` and drop its stores, as a process crash would.
     pub async fn crash(&self, node: NodeId) {
+        let _topology = self.topology.lock().await;
         for router in self.routers.read().expect("cluster lock").values() {
             router.remove(node);
         }
@@ -463,6 +482,7 @@ impl Cluster {
 
     /// (Re)start `node` from its on-disk stores, with a replica of every current range.
     pub async fn restart(&self, node: NodeId) -> Result<(), String> {
+        let _topology = self.topology.lock().await;
         let base = self.dir.join(format!("n{node}"));
         // The previous incarnation's handles drop asynchronously; RocksDB's lock frees then.
         let mut attempt = 0;

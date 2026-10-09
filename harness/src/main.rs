@@ -15,8 +15,13 @@
 //!   dscore-harness jepsen --workload register --internal-retry on|off --duration 1h \
 //!       --check lost-update,serializable
 //!
-//!   dscore-harness jepsen --workload list-append --nemesis partition,crash,clock \
-//!       --duration 1h --check serializable [--elle-jar PATH | ELLE_JAR] [--history FILE]
+//!   dscore-harness jepsen --workload list-append --nemesis partition,crash,clock,split \
+//!       --duration 1h --check serializable [--rate 50] [--elle-jar PATH | ELLE_JAR]
+//!       [--history FILE]
+//!
+//!   dscore-harness jepsen --workload splits --duration 1h --check serializable \
+//!       [--split-budget 60] [--nemesis split,crash,partition] [--elle-jar PATH | ELLE_JAR]
+//!   (list-append under continuous range splits, paced to last the run: REQ-0033 AC2)
 //!
 //! See powercut.rs, leaderkill.rs and membership_churn.rs for the methods. `node-group` is
 //! the child process the power-cut fault drives.
@@ -47,10 +52,11 @@ async fn jepsen(args: &[String]) -> ExitCode {
         Some("membership") => {}
         Some("edges") => return jepsen_edges(args).await,
         Some("register") => return jepsen_register(args).await,
-        Some("list-append") => return jepsen_list_append(args).await,
+        Some("list-append") => return jepsen_list_append(args, false).await,
+        Some("splits") => return jepsen_list_append(args, true).await,
         other => {
             eprintln!(
-                "jepsen: unsupported workload {other:?}; available: membership, edges, register, list-append"
+                "jepsen: unsupported workload {other:?}; available: membership, edges, register, list-append, splits"
             );
             return ExitCode::from(2);
         }
@@ -194,21 +200,27 @@ async fn power_cut(args: &[String]) -> ExitCode {
     }
 }
 
-async fn jepsen_list_append(args: &[String]) -> ExitCode {
+async fn jepsen_list_append(args: &[String], splits_workload: bool) -> ExitCode {
     let Some(duration) = flag_value(args, "--duration")
         .as_deref()
         .and_then(parse_duration)
     else {
         return usage();
     };
-    let nemeses =
-        match list_append::parse_nemeses(&flag_value(args, "--nemesis").unwrap_or_default()) {
-            Ok(n) => n,
-            Err(e) => {
-                eprintln!("jepsen list-append: {e}");
-                return ExitCode::from(2);
-            }
-        };
+    let default_nemeses = if splits_workload {
+        "split,crash,partition"
+    } else {
+        ""
+    };
+    let nemeses = match list_append::parse_nemeses(
+        &flag_value(args, "--nemesis").unwrap_or_else(|| default_nemeses.into()),
+    ) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("jepsen list-append: {e}");
+            return ExitCode::from(2);
+        }
+    };
     let consistency = flag_value(args, "--check").unwrap_or_else(|| "serializable".into());
     let jar = flag_value(args, "--elle-jar")
         .or_else(|| std::env::var("ELLE_JAR").ok())
@@ -227,7 +239,27 @@ async fn jepsen_list_append(args: &[String]) -> ExitCode {
     let seed = flag_value(args, "--seed")
         .and_then(|v| v.parse().ok())
         .unwrap_or_else(|| std::process::id() as u64);
-    let r = match list_append::run(duration, &nemeses, &history, seed).await {
+    let split_budget = splits_workload.then(|| {
+        flag_value(args, "--split-budget")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(60)
+    });
+    if splits_workload && !nemeses.contains(&list_append::Nemesis::Split) {
+        eprintln!("jepsen splits: the split nemesis is the point of this workload");
+        return ExitCode::from(2);
+    }
+    let rate = flag_value(args, "--rate")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(50.0);
+    let opts = list_append::Options {
+        duration,
+        nemeses: nemeses.clone(),
+        split_budget,
+        rate,
+        history,
+        seed,
+    };
+    let r = match list_append::run(&opts).await {
         Ok(r) => r,
         Err(e) => {
             eprintln!("jepsen list-append: {e}");
@@ -235,13 +267,22 @@ async fn jepsen_list_append(args: &[String]) -> ExitCode {
         }
     };
     println!(
-        "list-append: {duration:?} seed {seed} nemeses {nemeses:?}: {} ok, {} failed, {} unknown; {} faults injected; history {}",
+        "list-append: {duration:?} seed {seed} nemeses {nemeses:?}: {} ok, {} failed, {} unknown; {} faults injected ({} splits); history {}",
         r.ok,
         r.failed,
         r.unknown,
         r.faults.len(),
+        r.splits,
         r.history.display()
     );
+    // At least one split per 2 minutes of run, so a broken split path cannot pass silently.
+    if splits_workload && r.splits < (duration.as_secs() / 120).max(1) as usize {
+        eprintln!(
+            "FAIL: only {} splits completed; the workload did not exercise continuous splits",
+            r.splits
+        );
+        return ExitCode::FAILURE;
+    }
     match list_append::elle(&jar, &r.history, &consistency) {
         Ok((true, _)) if r.ok > 0 => {
             println!("elle: history is {consistency}");

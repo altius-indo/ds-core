@@ -206,6 +206,13 @@ impl RangeStateMachine {
         new_range: RangeId,
     ) -> Result<bool, AnyError> {
         let (start, end) = self.interval.read().expect("interval lock").clone();
+        // A retried split (its first proposal timed out but committed) is a no-op success.
+        if end.as_slice() == at
+            && let Ok(Some((child_start, _))) = self.engine.range_interval(new_range)
+            && child_start.as_slice() == at
+        {
+            return Ok(true);
+        }
         if at <= start.as_slice() || (!end.is_empty() && at >= end.as_slice()) {
             return Ok(false);
         }
@@ -406,5 +413,55 @@ impl RaftStateMachine<TypeConfig> for RangeStateMachine {
                 meta: s.meta,
                 snapshot: Box::new(Cursor::new(s.data)),
             }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use openraft::CommittedLeaderId;
+
+    use super::*;
+
+    fn entry(index: u64, cmd: Command) -> Entry {
+        Entry {
+            log_id: LogId::new(CommittedLeaderId::new(1, 1), index),
+            payload: EntryPayload::Normal(cmd),
+        }
+    }
+
+    #[tokio::test]
+    async fn repeated_split_is_idempotent() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let kv = KvEngine::open(dir.path()).unwrap();
+        let mut sm = kv.range(1, b"a".to_vec(), b"z".to_vec());
+        let split = || Command::Split {
+            at: b"m".to_vec(),
+            new_range: 7,
+        };
+        // The first proposal and its retry both commit: the retry reports success and changes
+        // nothing, so the caller goes on to start the child group.
+        let r = sm
+            .apply([entry(1, split()), entry(2, split())])
+            .await
+            .unwrap();
+        assert!(
+            matches!(r[..], [CommandResult::Ok, CommandResult::Ok]),
+            "{r:?}"
+        );
+        assert_eq!(
+            kv.range_interval(1).unwrap(),
+            Some((b"a".to_vec(), b"m".to_vec()))
+        );
+        assert_eq!(
+            kv.range_interval(7).unwrap(),
+            Some((b"m".to_vec(), b"z".to_vec()))
+        );
+        // A different split at the parent's new boundary is still refused.
+        let other = Command::Split {
+            at: b"m".to_vec(),
+            new_range: 8,
+        };
+        let r = sm.apply([entry(3, other)]).await.unwrap();
+        assert!(matches!(r[..], [CommandResult::Txn(_)]), "{r:?}");
     }
 }

@@ -59,12 +59,13 @@ jobs:
           cargo build --quiet --release --locked -p dscore-harness
           target/release/dscore-harness fault leader-kill --trials "${{ env.FULL == 'true' && '100' || '10' }}" --assert-p99-secs 10
 
-  # STORY-0002 E1, STORY-0007 E2, STORY-0006 E4, STORY-0005 E2: Jepsen-style workloads.
+  # STORY-0002 E1, STORY-0007 E2, STORY-0006 E4, STORY-0005 E2, STORY-0004 E2: Jepsen-style
+  # workloads.
   jepsen:
     strategy:
       fail-fast: false
       matrix:
-        workload: [membership, edges, register, list-append]
+        workload: [membership, edges, register, list-append, splits]
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -74,12 +75,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build harness
         run: cargo build --quiet --release --locked -p dscore-harness
-      - if: matrix.workload == 'list-append'
+      - if: matrix.workload == 'list-append' || matrix.workload == 'splits'
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "21"
-      - if: matrix.workload == 'list-append'
+      - if: matrix.workload == 'list-append' || matrix.workload == 'splits'
         name: Fetch elle-cli 0.1.11
         run: |
           mkdir -p ~/.cache/elle && cd ~/.cache/elle
@@ -104,10 +105,14 @@ jobs:
             list-append)
               # The membership nemesis arrives with per-range replica sets (TASK-0008 step 2).
               $h jepsen --workload list-append --nemesis partition,crash,clock,split --duration "$DURATION" --check serializable --history list-append.edn ;;
+            splits)
+              # Continuous splits (a 60-split budget spread over the run) overlapping crashes
+              # and partitions, checked by Elle: REQ-0033 AC2.
+              $h jepsen --workload splits --duration "$DURATION" --check serializable --history splits.edn ;;
           esac
-      - if: always() && matrix.workload == 'list-append'
+      - if: always() && (matrix.workload == 'list-append' || matrix.workload == 'splits')
         uses: actions/upload-artifact@v4
         with:
-          name: list-append-history
-          path: list-append.edn
+          name: ${{ matrix.workload }}-history
+          path: ${{ matrix.workload }}.edn
           if-no-files-found: ignore

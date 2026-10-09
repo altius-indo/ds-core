@@ -15,8 +15,9 @@
 //!
 //! The `split` nemesis splits the range owning a random key at (or just past) that key, under
 //! load; splits are permanent, so the range count grows over the run and in-flight
-//! transactions see their routing go stale mid-commit (REQ-0033, STORY-0004 E2). Not yet
-//! available: the `membership` nemesis (per-range replica sets arrive with TASK-0008 step 2).
+//! transactions see their routing go stale mid-commit (REQ-0033, STORY-0004 E2). The
+//! `membership` nemesis first adds a fourth node, then moves a random range's replica from a
+//! holder to a non-holder: learner, snapshot, joint consensus, removal (REQ-0017, REQ-0033).
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -39,6 +40,7 @@ pub enum Nemesis {
     Crash,
     Clock,
     Split,
+    Membership,
 }
 
 pub fn parse_nemeses(s: &str) -> Result<Vec<Nemesis>, String> {
@@ -49,9 +51,7 @@ pub fn parse_nemeses(s: &str) -> Result<Vec<Nemesis>, String> {
             "crash" => Nemesis::Crash,
             "clock" => Nemesis::Clock,
             "split" => Nemesis::Split,
-            "membership" => {
-                return Err("nemesis `membership` is not available yet: per-range replica sets arrive with TASK-0008".into());
-            }
+            "membership" => Nemesis::Membership,
             other => return Err(format!("unknown nemesis `{other}`")),
         });
     }
@@ -362,12 +362,13 @@ pub async fn run(o: &Options) -> Result<Report, String> {
     let mut faults = Vec::new();
     let mut splits = 0;
     let mut next = xorshift(o.seed | 1);
-    let nodes = cluster.node_ids();
     while tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_secs(2)).await;
         if sequential.is_empty() || tokio::time::Instant::now() >= deadline {
             continue;
         }
+        // The membership nemesis may have added a node.
+        let nodes = cluster.node_ids();
         let victim = nodes[(next() % nodes.len() as u64) as usize];
         match sequential[(next() % sequential.len() as u64) as usize] {
             Nemesis::Partition => {
@@ -394,6 +395,35 @@ pub async fn run(o: &Options) -> Result<Report, String> {
             Nemesis::Split => {
                 let (split, line) = split_near(&cluster, &keys, next(), next()).await;
                 splits += split as usize;
+                log_fault(&mut faults, line);
+            }
+            Nemesis::Membership => {
+                if nodes.len() < 4 {
+                    let line = match cluster.add_node().await {
+                        Ok(n) => format!("add node {n}"),
+                        Err(e) => format!("add node failed: {e}"),
+                    };
+                    log_fault(&mut faults, line);
+                    continue;
+                }
+                let ranges = cluster.ranges();
+                let d = &ranges[(next() % ranges.len() as u64) as usize];
+                let holders: Vec<u64> = d.replicas.iter().copied().collect();
+                let others: Vec<u64> = nodes
+                    .iter()
+                    .copied()
+                    .filter(|n| !d.replicas.contains(n))
+                    .collect();
+                if others.is_empty() {
+                    continue;
+                }
+                let from = holders[(next() % holders.len() as u64) as usize];
+                let to = others[(next() % others.len() as u64) as usize];
+                let line = match cluster.move_replica(d.id, from, to).await {
+                    Ok(()) => format!("move range {} replica {from} -> {to}", d.id),
+                    // The target is down, or the range lost its quorum meanwhile.
+                    Err(e) => format!("move range {} replica {from} -> {to} skipped: {e}", d.id),
+                };
                 log_fault(&mut faults, line);
             }
         }

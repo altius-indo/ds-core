@@ -15,7 +15,7 @@
 //!   dscore-harness jepsen --workload register --internal-retry on|off --duration 1h \
 //!       --check lost-update,serializable
 //!
-//!   dscore-harness jepsen --workload list-append --nemesis partition,crash,clock,split \
+//!   dscore-harness jepsen --workload list-append --nemesis partition,crash,clock,membership,split \
 //!       --duration 1h --check serializable [--rate 50] [--elle-jar PATH | ELLE_JAR]
 //!       [--history FILE]
 //!

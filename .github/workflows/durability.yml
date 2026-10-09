@@ -120,8 +120,8 @@ jobs:
               $h jepsen --workload register --internal-retry on --duration "$DURATION" --check lost-update,serializable
               $h jepsen --workload register --internal-retry off --duration 30s --check lost-update,serializable ;;
             list-append)
-              # The membership nemesis arrives with per-range replica sets (TASK-0008 step 2).
-              $h jepsen --workload list-append --nemesis partition,crash,clock,split --duration "$DURATION" --check serializable --history list-append.edn ;;
+              # STORY-0005 E2: every nemesis, including replica moves and splits.
+              $h jepsen --workload list-append --nemesis partition,crash,clock,membership,split --duration "$DURATION" --check serializable --history list-append.edn ;;
             splits)
               # Continuous splits (a 60-split budget spread over the run) overlapping crashes
               # and partitions, checked by Elle: REQ-0033 AC2.

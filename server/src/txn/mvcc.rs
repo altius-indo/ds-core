@@ -363,6 +363,71 @@ pub type ScanResult = Result<Vec<Pair>, (Vec<u8>, Intent)>;
 /// (newest version at or below a timestamp as (commit ts, value), newest commit ts overall).
 type VersionLookup = (Option<(Ts, Option<Vec<u8>>)>, Option<Ts>);
 
+/// A limited scan: up to `limit` pairs and, if the limit cut the span short, the key just past
+/// the last one returned (`None`: the whole span was read).
+pub type LimitedScan = Result<(Vec<Pair>, Option<Vec<u8>>), (Vec<u8>, Intent)>;
+
+/// Snapshot scan of at most `limit` pairs of `span` at `ts`, one seek per key. Only the part of
+/// the span up to the last pair returned was read: intents beyond it do not block, and the
+/// caller records only that part in its read set. Excludes `own`'s intents but does not
+/// overlay them (callers with buffered writes in the span use `scan`).
+pub fn scan_limit(
+    db: &DB,
+    span: &Span,
+    ts: Ts,
+    own: Option<TxnId>,
+    limit: usize,
+) -> Result<LimitedScan, String> {
+    let to = version_prefix(&span.end);
+    let mut out: Vec<Pair> = Vec::new();
+    let mut upto = None;
+    let mut it = db.raw_iterator();
+    it.seek(version_prefix(&span.start));
+    while let Some(k) = it.key() {
+        if k >= to.as_slice() {
+            break;
+        }
+        if out.len() == limit {
+            upto = out.last().map(|(k, _): &Pair| {
+                let mut next = k.clone();
+                next.push(0);
+                next
+            });
+            break;
+        }
+        let (key, _) = decode_version_key(k).ok_or("bad version key")?;
+        it.seek(version_key(&key, ts));
+        if let Some(k) = it.key()
+            && let Some((found, _)) = decode_version_key(k)
+            && found == key
+            && let Some(val) = it.value().map(dec_version).transpose()?.flatten()
+        {
+            out.push((key.clone(), val));
+        }
+        let mut next = version_key(&key, 0);
+        next.push(0);
+        it.seek(next);
+    }
+    it.status().map_err(|e| e.to_string())?;
+    // Intents in the part actually read.
+    let read_end = upto.clone().unwrap_or_else(|| span.end.clone());
+    let ik_end = intent_key(&read_end);
+    for item in db.iterator(IteratorMode::From(
+        &intent_key(&span.start),
+        Direction::Forward,
+    )) {
+        let (k, v) = item.map_err(|e| e.to_string())?;
+        if k.as_ref() >= ik_end.as_slice() {
+            break;
+        }
+        let intent: Intent = dec(&v)?;
+        if Some(intent.txn.id) != own {
+            return Ok(Err((k[1..].to_vec(), intent)));
+        }
+    }
+    Ok(Ok((out, upto)))
+}
+
 /// Snapshot scan of `span` at `ts`: committed pairs, or the first blocking intent and its key.
 pub fn scan(db: &DB, span: &Span, ts: Ts, own: Option<TxnId>) -> Result<ScanResult, String> {
     let ik_start = intent_key(&span.start);

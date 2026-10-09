@@ -243,6 +243,38 @@ impl Graph {
         };
         let (start, end) = keys::adjacency_span(self.id, node, dir, t);
         let pairs = txn.scan(&start, &end).await?;
+        self.decode_edges(txn, pairs).await
+    }
+
+    /// At most `limit` of `node`'s edges in one direction, in key order: a bounded one-hop
+    /// read that touches only the edges it returns, however many the node has (REQ-0024).
+    pub async fn edges_limit(
+        &self,
+        txn: &mut Txn,
+        node: NodeId,
+        dir: Direction,
+        edge_type: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Edge>, DsError> {
+        let t = match edge_type {
+            Some(name) => match self.lookup(txn, EDGE_TYPE, name).await? {
+                Some(t) => Some(t),
+                None => return Ok(Vec::new()),
+            },
+            None => None,
+        };
+        let (start, end) = keys::adjacency_span(self.id, node, dir, t);
+        let pairs = txn.scan_limit(&start, &end, limit).await?;
+        self.decode_edges(txn, pairs).await
+    }
+
+    /// Decode adjacency entries, resolving each distinct edge type name once.
+    async fn decode_edges(
+        &self,
+        txn: &mut Txn,
+        pairs: Vec<(Vec<u8>, Vec<u8>)>,
+    ) -> Result<Vec<Edge>, DsError> {
+        let mut names: std::collections::HashMap<TypeId, String> = Default::default();
         let mut out = Vec::with_capacity(pairs.len());
         for (k, v) in pairs {
             let (at, d, etype, other, rank) =
@@ -251,15 +283,67 @@ impl Graph {
                 Direction::Out => (at, other),
                 Direction::In => (other, at),
             };
+            let edge_type = match names.get(&etype) {
+                Some(n) => n.clone(),
+                None => {
+                    let n = self.name_of(txn, EDGE_TYPE, etype).await?;
+                    names.insert(etype, n.clone());
+                    n
+                }
+            };
             out.push(Edge {
                 src,
                 dst,
-                edge_type: self.name_of(txn, EDGE_TYPE, etype).await?,
+                edge_type,
                 rank,
                 properties: Record::decode(&v).map_err(bad_data)?,
             });
         }
         Ok(out)
+    }
+
+    /// Bulk-load edges `src -[edge_type #rank]-> dst` for every rank in `ranks`, all with
+    /// `properties`: each endpoint is checked once and duplicates with one scan of the batch's
+    /// contiguous key span, instead of four reads per edge (loader path, REQ-0024).
+    pub async fn insert_edges_bulk(
+        &self,
+        txn: &mut Txn,
+        src: NodeId,
+        dst: NodeId,
+        edge_type: &str,
+        ranks: std::ops::Range<u64>,
+        properties: &Record,
+    ) -> Result<(), DsError> {
+        self.limits.check_document(properties).map_err(invalid)?;
+        for endpoint in [src, dst] {
+            if txn.get(&keys::node_doc(self.id, endpoint)).await?.is_none() {
+                return Err(invalid(format!(
+                    "edge endpoint node {endpoint} does not exist"
+                )));
+            }
+        }
+        let t = self.intern(txn, EDGE_TYPE, edge_type).await?;
+        let first = keys::edge(self.id, src, Direction::Out, t, dst, ranks.start);
+        let past = keys::edge(self.id, src, Direction::Out, t, dst, ranks.end);
+        if let Some((k, _)) = txn.scan_limit(&first, &past, 1).await?.into_iter().next() {
+            let (_, _, _, _, rank) =
+                keys::decode_edge(self.id, &k).ok_or_else(|| bad_data("edge key"))?;
+            return Err(invalid(format!(
+                "edge {src}-[{edge_type}#{rank}]->{dst} already exists"
+            )));
+        }
+        let props = properties.encode();
+        for rank in ranks {
+            txn.put(
+                &keys::edge(self.id, src, Direction::Out, t, dst, rank),
+                &props,
+            );
+            txn.put(
+                &keys::edge(self.id, dst, Direction::In, t, src, rank),
+                &props,
+            );
+        }
+        Ok(())
     }
 }
 

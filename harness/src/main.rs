@@ -27,6 +27,9 @@
 //!       --assert-zero-errors [--records 4000] [--max-range-bytes 16384] [--rate 200]
 //!       [--settle 10s] [--move-interval 1s] [--seed N]
 //!
+//!   dscore-harness supernode --edges 10000000 --assert-split --assert-p99-ms 50 --limit 100
+//!       [--dsts 1000] [--batch 1000] [--workers 4] [--max-range-bytes 8388608] [--samples 1000]
+//!
 //! See powercut.rs, leaderkill.rs, membership_churn.rs and add_node.rs for the methods. `node-group` is
 //! the child process the power-cut fault drives.
 
@@ -38,6 +41,7 @@ mod membership_churn;
 mod node_group;
 mod powercut;
 mod register;
+mod supernode;
 
 /// Parse `90s`, `10m`, `1h` (or plain seconds).
 fn parse_duration(s: &str) -> Option<std::time::Duration> {
@@ -446,6 +450,81 @@ async fn leader_kill(args: &[String]) -> ExitCode {
     }
 }
 
+async fn supernode_cmd(args: &[String]) -> ExitCode {
+    let num = |name: &str, default: u64| {
+        flag_value(args, name)
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(default)
+    };
+    let opts = supernode::Options {
+        edges: num("--edges", 10_000_000),
+        dsts: num("--dsts", 1000),
+        batch: num("--batch", 1000),
+        workers: num("--workers", 4),
+        max_range_bytes: num("--max-range-bytes", 8 << 20),
+        limit: num("--limit", 100) as usize,
+        samples: num("--samples", 1000) as usize,
+    };
+    let p99_bound = flag_value(args, "--assert-p99-ms").and_then(|v| v.parse::<u64>().ok());
+    let dir = std::env::temp_dir().join(format!("dscore-supernode-{}", std::process::id()));
+    let r = supernode::run(&dir, &opts).await;
+    let _ = std::fs::remove_dir_all(&dir);
+    let r = match r {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("supernode: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    println!(
+        "supernode: {} of {} edges loaded on one node in {:?}, {} rejected; hub adjacency spans \
+         {} of {} ranges; LIMIT {} one-hop p50 {:?} p99 {:?}",
+        r.loaded,
+        opts.edges,
+        r.load_time,
+        r.rejected,
+        r.hub_ranges,
+        r.ranges,
+        opts.limit,
+        r.p50,
+        r.p99
+    );
+    let mut ok = true;
+    if r.rejected > 0 || r.loaded < opts.edges {
+        eprintln!(
+            "FAIL: {} edges rejected (REQ-0024 AC1); first: {}",
+            r.rejected,
+            r.first_rejection.unwrap_or_default()
+        );
+        ok = false;
+    }
+    if has(args, "--assert-split") && r.hub_ranges < 2 {
+        eprintln!("FAIL: the hub's adjacency is on one range (REQ-0024 AC1)");
+        ok = false;
+    }
+    if r.short_reads > 0 {
+        eprintln!(
+            "FAIL: {} bounded reads returned fewer edges than the limit",
+            r.short_reads
+        );
+        ok = false;
+    }
+    if let Some(ms) = p99_bound
+        && r.p99 > Duration::from_millis(ms)
+    {
+        eprintln!(
+            "FAIL: one-hop p99 {:?} exceeds {ms} ms (REQ-0024 AC2)",
+            r.p99
+        );
+        ok = false;
+    }
+    if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
 async fn scenario_add_node(args: &[String]) -> ExitCode {
     if flag_value(args, "--workload").as_deref() != Some("ycsb-a") {
         eprintln!("scenario add-node: only --workload ycsb-a is supported");
@@ -545,6 +624,7 @@ async fn main() -> ExitCode {
         ["fault", "leader-kill", ..] => leader_kill(&args[2..]).await,
         ["jepsen", ..] => jepsen(&args[1..]).await,
         ["scenario", "add-node", ..] => scenario_add_node(&args[2..]).await,
+        ["supernode", ..] => supernode_cmd(&args[1..]).await,
         ["node-group", ..] => {
             let Some(dir) = flag_value(&args, "--dir") else {
                 return usage();

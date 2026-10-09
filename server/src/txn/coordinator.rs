@@ -394,6 +394,71 @@ impl Txn {
         Ok(out)
     }
 
+    /// The first `limit` pairs of `[start, end)` in key order. Only the part of the span up to
+    /// the last pair returned joins the read set, so a bounded read of a huge adjacency list
+    /// neither reads nor conflicts with the rest of it.
+    pub async fn scan_limit(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, DsError> {
+        if self
+            .writes
+            .range(start.to_vec()..end.to_vec())
+            .next()
+            .is_some()
+        {
+            // Buffered writes in the span: the full scan overlays them correctly.
+            let mut all = self.scan(start, end).await?;
+            all.truncate(limit);
+            return Ok(all);
+        }
+        let span = Span {
+            start: start.to_vec(),
+            end: end.to_vec(),
+        };
+        let (ts, me) = (self.meta.start_ts, self.meta.id);
+        let mut out = Vec::new();
+        let read_end = 'whole: loop {
+            out.clear();
+            let mut upto = None;
+            for (range, part) in clip_to_ranges(&self.client.cluster.ranges(), &span) {
+                let want = limit - out.len();
+                let give_up = tokio::time::Instant::now() + self.client.cfg.lock_wait;
+                let (pairs, cut) = loop {
+                    let res = self
+                        .client
+                        .cluster
+                        .read_span(range, &part, |db| {
+                            mvcc::scan_limit(db, &part, ts, Some(me), want)
+                        })
+                        .await?;
+                    match res {
+                        None => continue 'whole,
+                        Some(r) => match r.map_err(internal)? {
+                            Ok(found) => break found,
+                            Err((key, intent)) => {
+                                self.client.handle_intent(&intent, &key, give_up).await?
+                            }
+                        },
+                    }
+                };
+                out.extend(pairs);
+                if cut.is_some() || out.len() == limit {
+                    upto = Some(cut.unwrap_or_else(|| part.end.clone()));
+                    break;
+                }
+            }
+            break upto.unwrap_or_else(|| span.end.clone());
+        };
+        self.reads.push(Span {
+            start: span.start,
+            end: read_end,
+        });
+        Ok(out)
+    }
+
     pub fn put(&mut self, key: &[u8], value: &[u8]) {
         self.writes.insert(key.to_vec(), Some(value.to_vec()));
     }

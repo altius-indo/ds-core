@@ -19,7 +19,6 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use openraft::Config;
-use openraft::storage::{RaftSnapshotBuilder, RaftStateMachine};
 
 use super::mvcc::{RangeStats, Span, TxnCommand, TxnResponse, live_stats, owns, owns_span};
 use crate::raft::log_store::LogEngine;
@@ -542,10 +541,7 @@ impl Cluster {
         let vote = leader.metrics().borrow().vote;
         let snapshot = leader_kv
             .range(range, desc.start.clone(), desc.end.clone())
-            .get_snapshot_builder()
-            .await
-            .build_snapshot()
-            .await
+            .snapshot_now()
             .map_err(|e| e.to_string())?;
         kv_to
             .wipe_range(range, &desc.start, &desc.end)
@@ -736,10 +732,7 @@ impl Cluster {
         };
         let snapshot = leader_kv
             .range(range, start.clone(), end.clone())
-            .get_snapshot_builder()
-            .await
-            .build_snapshot()
-            .await
+            .snapshot_now()
             .map_err(|e| e.to_string())?;
         kv.wipe_range(range, &start, &end)
             .map_err(|e| e.to_string())?;

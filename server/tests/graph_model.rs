@@ -410,4 +410,85 @@ mod stored {
             .unwrap_err();
         assert_eq!(err.code, ErrorCode::ConstraintViolation);
     }
+
+    // reqforge: verifies REQ-0024#AC2
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn bounded_one_hop_reads_only_what_it_returns() {
+        let (client, _dir) = env().await;
+        let g = Graph::new(1);
+        let mut t = client.begin().await.unwrap();
+        g.insert_node(&mut t, A, &["Hub"], &Record::empty())
+            .await
+            .unwrap();
+        g.insert_node(&mut t, B, &["Leaf"], &Record::empty())
+            .await
+            .unwrap();
+        g.insert_edges_bulk(&mut t, A, B, "LINK", 0..50, &Record::empty())
+            .await
+            .unwrap();
+        t.commit().await.unwrap();
+
+        // The first 10 edges, in rank order, without reading the other 40.
+        let mut reader = client.begin().await.unwrap();
+        let first = g
+            .edges_limit(&mut reader, A, Direction::Out, None, 10)
+            .await
+            .unwrap();
+        let ranks: Vec<u64> = first.iter().map(|e| e.rank).collect();
+        assert_eq!(ranks, (0..10).collect::<Vec<_>>());
+        assert!(first.iter().all(|e| e.edge_type == "LINK" && e.dst == B));
+
+        // An edge added past the part read does not conflict with the reader...
+        let mut w = client.begin().await.unwrap();
+        g.insert_edges_bulk(&mut w, A, B, "LINK", 100..101, &Record::empty())
+            .await
+            .unwrap();
+        w.commit().await.unwrap();
+        reader.put(b"marker", b"1");
+        reader.commit().await.unwrap();
+
+        // ...but one inside it does: the bounded read is still serializable.
+        let mut reader = client.begin().await.unwrap();
+        g.edges_limit(&mut reader, A, Direction::Out, None, 10)
+            .await
+            .unwrap();
+        let mut w = client.begin().await.unwrap();
+        g.delete_edge(&mut w, A, "LINK", B, 3).await.unwrap();
+        w.commit().await.unwrap();
+        reader.put(b"marker", b"2");
+        let e = reader.commit().await.unwrap_err();
+        assert_eq!(e.code, ErrorCode::SerializationConflict, "{e}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn bulk_edges_check_endpoints_and_duplicates() {
+        let (client, _dir) = env().await;
+        let g = Graph::new(1);
+        let mut t = client.begin().await.unwrap();
+        g.insert_node(&mut t, A, &["Hub"], &Record::empty())
+            .await
+            .unwrap();
+        g.insert_node(&mut t, C, &["Leaf"], &Record::empty())
+            .await
+            .unwrap();
+        g.insert_edges_bulk(&mut t, A, C, "LINK", 0..5, &Record::empty())
+            .await
+            .unwrap();
+        t.commit().await.unwrap();
+
+        let mut t = client.begin().await.unwrap();
+        let e = g
+            .insert_edges_bulk(&mut t, A, C, "LINK", 4..8, &Record::empty())
+            .await
+            .unwrap_err();
+        assert!(e.message.contains("#4]"), "{e}");
+        let e = g
+            .insert_edges_bulk(&mut t, A, B, "LINK", 0..1, &Record::empty())
+            .await
+            .unwrap_err();
+        assert!(e.message.contains("does not exist"), "{e}");
+        // Both directions were written for every rank.
+        let ins = g.edges(&mut t, C, Direction::In, None).await.unwrap();
+        assert_eq!(ins.len(), 5);
+    }
 }

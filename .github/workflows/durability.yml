@@ -76,6 +76,25 @@ jobs:
             --assert-balance 0.10 --within 1h --assert-zero-errors \
             --records "${{ env.FULL == 'true' && '20000' || '4000' }}"
 
+  # STORY-0009 E1 (REQ-0024): 10M edges on one node, split across ranges; LIMIT 100 one-hop
+  # p99 within 50 ms. Pushes load 200k edges with a 1 MiB range limit so splits still happen.
+  supernode:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: E1 supernode
+        run: |
+          cargo build --quiet --release --locked -p dscore-harness
+          if [ "${{ env.FULL }}" = "true" ]; then
+            target/release/dscore-harness supernode --edges 10000000 --assert-split --assert-p99-ms 50 --limit 100
+          else
+            target/release/dscore-harness supernode --edges 200000 --max-range-bytes 1048576 --assert-split --assert-p99-ms 50 --limit 100
+          fi
+
   # STORY-0002 E1, STORY-0007 E2, STORY-0006 E4, STORY-0005 E2, STORY-0004 E2: Jepsen-style
   # workloads.
   jepsen:

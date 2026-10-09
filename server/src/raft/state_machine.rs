@@ -198,17 +198,12 @@ struct SnapshotData {
 }
 
 #[derive(Clone)]
-struct StoredSnapshot {
-    meta: SnapshotMeta,
-    data: Vec<u8>,
-}
-
-#[derive(Clone)]
 pub struct RangeStateMachine {
     engine: Arc<KvEngine>,
     range: RangeId,
     interval: Arc<RwLock<Interval>>,
-    snapshot: Arc<Mutex<Option<StoredSnapshot>>>,
+    /// Meta of the snapshot cached on disk by this incarnation (see `snapshot_path`).
+    snapshot: Arc<Mutex<Option<SnapshotMeta>>>,
 }
 
 fn encode<T: Serialize>(v: &T) -> Result<Vec<u8>, AnyError> {
@@ -321,12 +316,20 @@ impl RangeStateMachine {
     }
 }
 
-impl RaftSnapshotBuilder<TypeConfig> for RangeStateMachine {
-    async fn build_snapshot(&mut self) -> Result<Snapshot<TypeConfig>, StorageError> {
-        let (applied, membership, pairs) = self
-            .consistent_state()
-            .map_err(StorageIOError::read_state_machine)?;
-        let data = encode(&SnapshotData { pairs }).map_err(StorageIOError::read_state_machine)?;
+impl RangeStateMachine {
+    /// A snapshot of this replica's state now, not cached: for seeding a new replica from a
+    /// leader's store without touching the leader's own snapshot.
+    pub fn snapshot_now(&self) -> Result<Snapshot<TypeConfig>, String> {
+        let (meta, data) = self.snapshot_parts().map_err(|e| e.to_string())?;
+        Ok(Snapshot {
+            meta,
+            snapshot: Box::new(Cursor::new(data)),
+        })
+    }
+
+    fn snapshot_parts(&self) -> Result<(SnapshotMeta, Vec<u8>), AnyError> {
+        let (applied, membership, pairs) = self.consistent_state()?;
+        let data = encode(&SnapshotData { pairs })?;
         let snapshot_id = match applied {
             Some(l) => format!("{}-{}-{}", self.range, l.leader_id, l.index),
             None => format!("{}-empty", self.range),
@@ -336,10 +339,38 @@ impl RaftSnapshotBuilder<TypeConfig> for RangeStateMachine {
             last_membership: membership,
             snapshot_id,
         };
-        *self.snapshot.lock().expect("snapshot lock") = Some(StoredSnapshot {
-            meta: meta.clone(),
-            data: data.clone(),
-        });
+        Ok((meta, data))
+    }
+
+    /// Where this replica caches its current snapshot: on disk, beside the store, so a node
+    /// holding many ranges does not keep a copy of all its data in memory.
+    fn snapshot_path(&self) -> std::path::PathBuf {
+        let db = self.engine.db.path();
+        db.parent()
+            .unwrap_or(db)
+            .join("snapshots")
+            .join(format!("{}.snap", self.range))
+    }
+
+    /// Cache a snapshot (meta and data in one file, written atomically).
+    fn cache_snapshot(&self, meta: &SnapshotMeta, data: &[u8]) -> std::io::Result<()> {
+        let path = self.snapshot_path();
+        let tmp = path.with_extension("tmp");
+        std::fs::create_dir_all(path.parent().expect("snapshot dir"))?;
+        std::fs::write(&tmp, encode(&(meta, data)).map_err(std::io::Error::other)?)?;
+        std::fs::rename(&tmp, &path)?;
+        *self.snapshot.lock().expect("snapshot lock") = Some(meta.clone());
+        Ok(())
+    }
+}
+
+impl RaftSnapshotBuilder<TypeConfig> for RangeStateMachine {
+    async fn build_snapshot(&mut self) -> Result<Snapshot<TypeConfig>, StorageError> {
+        let (meta, data) = self
+            .snapshot_parts()
+            .map_err(StorageIOError::read_state_machine)?;
+        self.cache_snapshot(&meta, &data)
+            .map_err(|e| StorageIOError::write_snapshot(Some(meta.signature()), &e))?;
         Ok(Snapshot {
             meta,
             snapshot: Box::new(Cursor::new(data)),
@@ -456,23 +487,23 @@ impl RaftStateMachine<TypeConfig> for RangeStateMachine {
             .write(batch)
             .map_err(|e| StorageIOError::write_state_machine(&e))?;
         self.reload_interval();
-        *self.snapshot.lock().expect("snapshot lock") = Some(StoredSnapshot {
-            meta: meta.clone(),
-            data,
-        });
+        self.cache_snapshot(meta, &data)
+            .map_err(|e| StorageIOError::write_snapshot(Some(meta.signature()), &e))?;
         Ok(())
     }
 
     async fn get_current_snapshot(&mut self) -> Result<Option<Snapshot<TypeConfig>>, StorageError> {
-        Ok(self
-            .snapshot
-            .lock()
-            .expect("snapshot lock")
-            .clone()
-            .map(|s| Snapshot {
-                meta: s.meta,
-                snapshot: Box::new(Cursor::new(s.data)),
-            }))
+        let Some(cached) = self.snapshot.lock().expect("snapshot lock").clone() else {
+            return Ok(None);
+        };
+        let bytes = std::fs::read(self.snapshot_path())
+            .map_err(|e| StorageIOError::read_snapshot(Some(cached.signature()), &e))?;
+        let (meta, data): (SnapshotMeta, Vec<u8>) = decode(&bytes)
+            .map_err(|e| StorageIOError::read_snapshot(Some(cached.signature()), e))?;
+        Ok(Some(Snapshot {
+            meta,
+            snapshot: Box::new(Cursor::new(data)),
+        }))
     }
 }
 
